@@ -43,9 +43,9 @@ pub struct UnixListener {
     inner: StdUnixListner,
 }
 
-/// An iterator over incoming connections to a [UnixListener](crate::UnixListener).
+/// An iterator over incoming connections to a `UnixListener`.
 ///
-/// It is an infinate iterator that will never return `None`
+/// It is an infinite iterator that will never return `None`
 #[derive(Debug)]
 pub struct Incoming<'a> {
     listener: &'a UnixListener,
@@ -67,7 +67,7 @@ impl UnixStream {
         StdUnixStream::connect(path).map(|s| s.into())
     }
 
-    /// Creates an unamed pair of connected sockets.
+    /// Creates an unnamed pair of connected sockets.
     ///
     /// Returns two `UnixStream`s which are connected to each other.
     pub fn pair() -> io::Result<(UnixStream, UnixStream)> {
@@ -107,6 +107,13 @@ impl UnixStream {
     }
 }
 
+/// Enqueue a [`RawFd`][RawFd] for later transmission across the `UnixStream`.
+///
+/// The [`RawFd`][RawFd] will be transmitted on a later call to a method of `Write`.
+/// The number of [`RawFd`][RawFd] that can be enqueued before being transmitted is
+/// bounded by `FD_QUEUE_SIZE`.
+///
+/// [RawFd]: https://doc.rust-lang.org/stable/std/os/unix/io/type.RawFd.html
 impl EnqueueFd for UnixStream {
     fn enqueue(&mut self, fd: &impl AsRawFd) -> std::result::Result<(), QueueFullError> {
         let outfd = self.outfd.get_or_insert_with(|| Vec::with_capacity(Self::FD_QUEUE_SIZE));
@@ -119,12 +126,30 @@ impl EnqueueFd for UnixStream {
     }
 }
 
+/// Dequeue a [`RawFd`][RawFd] that was previously transmitted across the
+/// `UnixStream`.
+///
+/// The [`RawFd`][RawFd] that are dequeued were transmitted by a previous call to a
+/// method of `Read`.
+///
+/// [RawFd]: https://doc.rust-lang.org/stable/std/os/unix/io/type.RawFd.html
 impl DequeueFd for UnixStream {
     fn dequeue(&mut self) -> Option<RawFd> {
         self.infd.pop_front()
     }
 }
 
+/// Receive bytes and [`RawFd`][RawFd] that are transmitted across the `UnixStream`.
+///
+/// The [`RawFd`][RawFd] that are received along with the bytes will be available
+/// through the method of the `DequeueFd` implementation. The number of
+/// [`RawFd`][RawFd] that can be received in a single call to one of the `Read`
+/// methods is bounded by `FD_QUEUE_SIZE`. It is an error if the other side of this
+/// `UnixStream` attempted to send more control messages (including [`RawFd`][RawFd])
+/// than will fit in the buffer that has been sized for receiving up to
+/// `FD_QUEUE_SIZE` [`RawFd`][RawFd].
+///
+/// [RawFd]: https://doc.rust-lang.org/stable/std/os/unix/io/type.RawFd.html
 impl Read for UnixStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         self.read_vectored(&mut [IoSliceMut::new(buf)])
@@ -153,6 +178,12 @@ impl Read for UnixStream {
     }
 }
 
+/// Transmit bytes and [`RawFd`][RawFd] across the `UnixStream`.
+///
+/// The [`RawFd`][RawFd] that are transmitted along with the bytes are ones that were
+/// previously enqueued for transmission through the method of `EnqueueFd`.
+///
+/// [RawFd]: https://doc.rust-lang.org/stable/std/os/unix/io/type.RawFd.html
 impl Write for UnixStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.write_vectored(&[IoSlice::new(buf)])
@@ -257,7 +288,7 @@ impl UnixListener {
         self.inner.take_error()
     }
 
-    /// Returns an interator over incoming connections.
+    /// Returns an iterator over incoming connections.
     ///
     /// The iterator will never return `None` and also will not yield the peer's
     /// [`SocketAddr`][SocketAddr] structure.
@@ -437,7 +468,7 @@ mod test {
         sut2.read(&mut buf).expect("Can't read");
         let fd = sut2.dequeue().expect("Empty fd queue");
 
-        assert!(fd != shm.fd, "fd's unexpectly equal");
+        assert!(fd != shm.fd, "fd's unexpectedly equal");
         assert!(compare_hello(fd), "fd didn't contain expect contents");
     }
 }
