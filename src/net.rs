@@ -9,11 +9,10 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::io::{self, Error, ErrorKind, IoSlice, IoSliceMut, prelude::*};
-use std::marker::PhantomData;
 use std::mem::size_of;
 use std::net::Shutdown;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
-use std::os::unix::net::{SocketAddr, UnixStream as StdUnixStream};
+use std::os::unix::net::{SocketAddr, UnixListener as StdUnixListner, UnixStream as StdUnixStream};
 use std::path::Path;
 use std::slice;
 
@@ -39,12 +38,21 @@ pub struct UnixStream {
 /// have support for passing [`RawFd`][RawFd].
 ///
 /// [RawFd]: https://doc.rust-lang.org/stable/std/os/unix/io/type.RawFd.html
-pub struct UnixListener {}
+#[derive(Debug)]
+pub struct UnixListener {
+    inner: StdUnixListner,
+}
+
+/// An iterator over incoming connections to a [UnixListener](crate::UnixListener).
+///
+/// It is an infinate iterator that will never return `None`
+#[derive(Debug)]
+pub struct Incoming<'a> {
+    listener: &'a UnixListener,
+}
 
 #[derive(Debug)]
-struct CMsgTruncatedError {
-    _private: PhantomData<()>,
-}
+struct CMsgTruncatedError { }
 
 // === impl UnixStream ===
 impl UnixStream {
@@ -213,14 +221,105 @@ fn map_error(e: nix::Error) -> io::Error {
     }
 }
 
+// === impl UnixListener ===
+impl UnixListener {
+
+    /// Create a new `UnixListener` bound to the specified socket.
+    pub fn bind(path: impl AsRef<Path>) -> io::Result<UnixListener> {
+        StdUnixListner::bind(path).map(|s| s.into())
+    }
+
+    /// Accepts a new incoming connection to this server.
+    ///
+    /// This function will block the calling thread until a new Unix connection is
+    /// established. When established the corresponding `UnixStream` and the remote
+    /// peer's address will be returned.
+    pub fn accept(&self) -> io::Result<(UnixStream, SocketAddr)> {
+        self.inner.accept().map(|(s, a)| (s.into(), a))
+    }
+
+    /// Create a new independently owned handle to the underlying socket.
+    ///
+    /// The returned `UnixListener` is a reference to the same socket that this
+    /// object references. Both handles can be used to accept incoming connections
+    /// and options set on one will affect the other.
+    pub fn try_clone(&self) -> io::Result<UnixListener> {
+        self.inner.try_clone().map(|s| s.into())
+    }
+
+    /// Returns the local address of of this listener.
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.inner.local_addr()
+    }
+
+    /// Return the value of the `SO_ERROR` option.
+    pub fn take_error(&self) -> io::Result<Option<Error>> {
+        self.inner.take_error()
+    }
+
+    /// Returns an interator over incoming connections.
+    ///
+    /// The iterator will never return `None` and also will not yield the peer's
+    /// [`SocketAddr`][SocketAddr] structure.
+    ///
+    /// [SocketAddr]: https://doc.rust-lang.org/stable/std/os/unix/net/struct.SocketAddr.html
+    pub fn incoming(&self) -> Incoming {
+        Incoming {
+            listener: self,
+        }
+    }
+}
+
+impl AsRawFd for UnixListener {
+    fn as_raw_fd(&self) -> RawFd {
+        self.inner.as_raw_fd()
+    }
+}
+
+impl FromRawFd for UnixListener {
+    unsafe fn from_raw_fd(fd: RawFd) -> Self {
+        StdUnixListner::from_raw_fd(fd).into()
+    }
+}
+
+impl IntoRawFd for UnixListener {
+    fn into_raw_fd(self) -> RawFd {
+        self.inner.into_raw_fd()
+    }
+}
+
+impl<'a> IntoIterator for &'a UnixListener {
+    type Item = io::Result<UnixStream>;
+    type IntoIter= Incoming<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.incoming()
+    }
+}
+
+impl From<StdUnixListner> for UnixListener {
+    fn from(inner: StdUnixListner) -> Self {
+        UnixListener { inner }
+    }
+}
+
+// === impl Incoming ===
+impl Iterator for Incoming<'_> {
+    type Item = io::Result<UnixStream>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        Some(self.listener.accept().map(|(s, _)| s))
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        (usize::MAX, None)
+    }
+}
 
 // === impl CMsgTruncatedError ===
-
 impl CMsgTruncatedError {
     fn new() -> CMsgTruncatedError {
-        CMsgTruncatedError {
-            _private: PhantomData,
-        }
+        CMsgTruncatedError { }
     }
 }
 

@@ -24,7 +24,7 @@ use std::marker::PhantomData;
 use std::os::unix::io::{AsRawFd, RawFd};
 
 mod net;
-pub use net::{UnixStream, UnixListener};
+pub use net::{Incoming, UnixStream, UnixListener};
 
 /// An interface to enqueue a [`RawFd`][RawFd] for later tranmission to a different
 /// process.
