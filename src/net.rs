@@ -25,6 +25,45 @@ use crate::{EnqueueFd, DequeueFd, QueueFullError};
 /// A structure representing a connected Unix socket with support for passing
 /// [`RawFd`][RawFd].
 ///
+/// This is the primary implementation of `EnqueueFd` and `DequeueFd` and it is based
+/// on a blocking, Unix domain socket. Conceptually the key interfaces on
+/// `UnixStream` interact as shown in the following diagram:
+///
+/// ```text
+/// EnqueueFd => Write => Read => DequeueFd
+/// ```
+///
+/// That is, you first endqueue a [`RawFd`][RawFd] to the `UnixStream` and then
+/// `Write` at least one byte. On the other side of the `UnixStream` you then `Read`
+/// at least one byte and then dequeue the [`RawFd`][RawFd].
+///
+/// # Examples
+///
+/// ```
+/// # use fd_queue::{EnqueueFd, DequeueFd, UnixStream};
+/// # use std::io::prelude::*;
+/// # use std::os::unix::io::FromRawFd;
+/// # use tempfile::tempfile;
+/// use std::fs::File;
+///
+/// let (mut sock1, mut sock2) = UnixStream::pair()?;
+///
+/// // sender side
+/// # let file1: File = tempfile()?;
+/// // let file1: File = ...
+/// sock1.enqueue(&file1).expect("Can't endqueue the file descriptor.");
+/// sock1.write(b"a")?;
+/// sock1.flush()?;
+///
+/// // receiver side
+/// let mut buf = [0u8; 1];
+/// sock2.read(&mut buf)?;
+/// let fd = sock2.dequeue().expect("Can't dequeue the file descriptor.");
+/// let file2 = unsafe { File::from_raw_fd(fd) };
+///
+/// # Ok::<(),std::io::Error>(())
+/// ```
+///
 /// [RawFd]: https://doc.rust-lang.org/stable/std/os/unix/io/type.RawFd.html
 #[derive(Debug)]
 pub struct UnixStream {
@@ -63,6 +102,31 @@ impl UnixStream {
     pub const FD_QUEUE_SIZE: usize = 2;
 
     /// Connects to the socket named by `path`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::thread;
+    /// # use fd_queue::UnixListener;
+    /// # use tempfile::tempdir;
+    /// use fd_queue::UnixStream;
+    ///
+    /// # let dir = tempdir()?;
+    /// # let path = dir.path().join("mysock");
+    /// // let path = ...
+    /// # let listener = UnixListener::bind(&path)?;
+    /// # thread::spawn(move || listener.accept());
+    ///
+    /// let sock = match UnixStream::connect(path) {
+    ///     Ok(sock) => sock,
+    ///     Err(e) => {
+    ///         println!("Couldn't connect to a socket: {}", e);
+    ///         return Ok(());
+    ///     }
+    /// };
+    ///
+    /// # Ok::<(), std::io::Error>(())
+    /// ```
     pub fn connect<P: AsRef<Path>>(path: P) -> io::Result<UnixStream> {
         StdUnixStream::connect(path).map(|s| s.into())
     }
@@ -70,6 +134,20 @@ impl UnixStream {
     /// Creates an unnamed pair of connected sockets.
     ///
     /// Returns two `UnixStream`s which are connected to each other.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fd_queue::UnixStream;
+    ///
+    /// let (sock1, sock2) = match UnixStream::pair() {
+    ///     Ok((sock1, sock2)) => (sock1, sock2),
+    ///     Err(e) => {
+    ///         println!("Couldn't create a pair of sockets: {}", e);
+    ///         return;
+    ///     }
+    /// };
+    /// ```
     pub fn pair() -> io::Result<(UnixStream, UnixStream)> {
         StdUnixStream::pair().map(|(s1, s2)| (s1.into(), s2.into()))
     }
@@ -79,21 +157,115 @@ impl UnixStream {
     /// The returned `UnixStream` is a reference to the same stream that this object references.
     /// Both handles will read and write the same stream of data, and options set on one stream
     /// will be propagated to the other stream.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fd_queue::UnixStream;
+    ///
+    /// let (sock1, _) = UnixStream::pair()?;
+    ///
+    /// let sock2 = match sock1.try_clone() {
+    ///     Ok(sock) => sock,
+    ///     Err(e) => {
+    ///         println!("Couldn't clone a socket: {}", e);
+    ///         return Ok(());
+    ///     }
+    /// };
+    ///
+    /// # Ok::<(),std::io::Error>(())
+    /// ```
     pub fn try_clone(&self) -> io::Result<UnixStream> {
         self.inner.try_clone().map(|s| s.into())
     }
 
     /// Returns the socket address of the local half of this connection.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::thread;
+    /// # use fd_queue::UnixListener;
+    /// # use tempfile::tempdir;
+    /// use fd_queue::UnixStream;
+    ///
+    /// # let dir = tempdir()?;
+    /// # let path = dir.path().join("mysock");
+    /// // let path = ...
+    /// # let listener = UnixListener::bind(&path)?;
+    /// # thread::spawn(move || listener.accept());
+    /// #
+    /// let sock = UnixStream::connect(path)?;
+    ///
+    /// let addr = match sock.local_addr() {
+    ///     Ok(addr) => addr,
+    ///     Err(e) => {
+    ///         println!("Couldn't get the local address: {}", e);
+    ///         return Ok(());
+    ///     }
+    /// };
+    ///
+    /// # Ok::<(),std::io::Error>(())
+    /// ```
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.inner.local_addr()
     }
 
     /// Returns the socket address of the remote half of this connection.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use std::thread;
+    /// # use fd_queue::UnixListener;
+    /// # use tempfile::tempdir;
+    /// use fd_queue::UnixStream;
+    ///
+    /// # let dir = tempdir()?;
+    /// # let path = dir.path().join("mysock");
+    /// // let path = ...
+    /// # let listener = UnixListener::bind(&path)?;
+    /// # thread::spawn(move || listener.accept());
+    /// #
+    /// let sock = UnixStream::connect(path)?;
+    ///
+    /// let addr = match sock.peer_addr() {
+    ///     Ok(addr) => addr,
+    ///     Err(e) => {
+    ///         println!("Couldn't get the local address: {}", e);
+    ///         return Ok(());
+    ///     }
+    /// };
+    ///
+    /// # Ok::<(),std::io::Error>(())
+    /// ```
     pub fn peer_addr(&self) -> io::Result<SocketAddr> {
         self.inner.peer_addr()
     }
 
     /// Returns the value of the `SO_ERROR` option.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fd_queue::UnixStream;
+    ///
+    /// let (sock, _) = UnixStream::pair()?;
+    ///
+    /// let err = match sock.take_error() {
+    ///     Ok(Some(err)) => err,
+    ///     Ok(None) => {
+    ///         println!("No error found.");
+    ///         return Ok(());
+    ///     }
+    ///     Err(e) => {
+    ///         println!("Couldn't take the SO_ERROR option: {}", e);
+    ///         return Ok(());
+    ///     }
+    /// };
+    ///
+    /// # Ok::<(),std::io::Error>(())
+    /// ```
     pub fn take_error(&self) -> io::Result<Option<Error>> {
         self.inner.take_error()
     }
@@ -102,6 +274,26 @@ impl UnixStream {
     ///
     /// This function will cause all pending and future I/O calls on the specified portions to
     /// immediately return with an appropriate value.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fd_queue::UnixStream;
+    /// use std::net::Shutdown;
+    /// use std::io::Read;
+    ///
+    /// let (mut sock, _) = UnixStream::pair()?;
+    ///
+    /// sock.shutdown(Shutdown::Read).expect("Couldn't shutdown.");
+    ///
+    /// let mut buf = [0u8; 256];
+    /// match sock.read(buf.as_mut()) {
+    ///     Ok(0) => {},
+    ///     _ => panic!("Read unexpectly not shut down."),
+    /// }
+    ///
+    /// # Ok::<(),std::io::Error>(())
+    /// ```
     pub fn shutdown(&self, how: Shutdown) -> io::Result<()> {
         self.inner.shutdown(how)
     }
