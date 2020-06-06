@@ -18,7 +18,13 @@
 
 #![deny(missing_docs, warnings)]
 
+use std::error::Error;
+use std::fmt::{self, Display};
+use std::marker::PhantomData;
 use std::os::unix::io::{AsRawFd, RawFd};
+
+mod net;
+pub use net::{UnixStream, UnixListener};
 
 /// An interface to enqueue a [`RawFd`][RawFd] for later tranmission to a different
 /// process.
@@ -36,7 +42,7 @@ pub trait EnqueueFd {
     ///
     /// The caller is responsible for keeping `fd` open until after the `write()` and
     /// `flush()` calls for actually transmitting the `fd` have been completed.
-    fn enqueue(fd: impl AsRawFd);
+    fn enqueue(&mut self, fd: &impl AsRawFd) -> Result<(), QueueFullError>;
 }
 
 /// An interface to dequeue a [`RawFd`][RawFd] that was previously transmitted from a
@@ -56,5 +62,32 @@ pub trait DequeueFd {
     /// The caller is responsible for closing this `RawFd`.
     ///
     /// [RawFd]: https://doc.rust-lang.org/stable/std/os/unix/io/type.RawFd.html
-    fn dequeue() -> RawFd;
+    fn dequeue(&mut self) -> Option<RawFd>;
 }
+
+/// Error returned when the queue of [`RawFd`][RawFd] is full.
+///
+/// [RawFd]: https://doc.rust-lang.org/stable/std/os/unix/io/type.RawFd.html
+#[derive(Debug)]
+pub struct QueueFullError {
+    _private: PhantomData<()>,
+}
+
+impl QueueFullError {
+
+    /// Create a new `QueueFullError`.
+    #[inline]
+    pub fn new() -> QueueFullError {
+        QueueFullError{
+            _private: PhantomData,
+        }
+    }
+}
+
+impl Display for QueueFullError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+        write!(f, "file descriptor queue is full")
+    }
+}
+
+impl Error for QueueFullError { }
