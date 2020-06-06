@@ -448,6 +448,25 @@ fn map_error(e: nix::Error) -> io::Error {
 impl UnixListener {
 
     /// Create a new `UnixListener` bound to the specified socket.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fd_queue::UnixListener;
+    /// # use tempfile::tempdir;
+    /// # let dir = tempdir()?;
+    /// # let path = dir.path().join("mysocket");
+    /// // let path = ...
+    /// let listener = match UnixListener::bind(&path) {
+    ///     Ok(listener) => listener,
+    ///     Err(e) => {
+    ///         println!("Can't bind the unix socket libtest: {}", e);
+    ///         return Ok(());
+    ///     }
+    /// };
+    ///
+    /// # Ok::<(),std::io::Error>(())
+    /// ```
     pub fn bind(path: impl AsRef<Path>) -> io::Result<UnixListener> {
         StdUnixListner::bind(path).map(|s| s.into())
     }
@@ -457,6 +476,31 @@ impl UnixListener {
     /// This function will block the calling thread until a new Unix connection is
     /// established. When established the corresponding `UnixStream` and the remote
     /// peer's address will be returned.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fd_queue::UnixListener;
+    /// # use fd_queue::UnixStream;
+    /// # use std::thread;
+    /// # use tempfile::tempdir;
+    /// # let dir = tempdir()?;
+    /// # let path = dir.path().join("mysocket");
+    ///
+    /// // let path = ...
+    /// let listener = UnixListener::bind(&path)?;
+    /// # thread::spawn(move || UnixStream::connect(path).expect("Can't connect"));
+    ///
+    /// let (sock, addr) = match listener.accept() {
+    ///     Ok((sock, addr)) => (sock, addr),
+    ///     Err(e) => {
+    ///         println!("Can't accept unix stream: {}", e);
+    ///         return Ok(());
+    ///     }
+    /// };
+    ///
+    /// # Ok::<(),std::io::Error>(())
+    /// ```
     pub fn accept(&self) -> io::Result<(UnixStream, SocketAddr)> {
         self.inner.accept().map(|(s, a)| (s.into(), a))
     }
@@ -466,16 +510,86 @@ impl UnixListener {
     /// The returned `UnixListener` is a reference to the same socket that this
     /// object references. Both handles can be used to accept incoming connections
     /// and options set on one will affect the other.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fd_queue::UnixListener;
+    /// # use tempfile::tempdir;
+    /// # let dir = tempdir()?;
+    /// # let path = dir.path().join("mysocket");
+    ///
+    /// // let path = ...
+    /// let listener1 = UnixListener::bind(&path)?;
+    ///
+    /// let listener2 = match listener1.try_clone() {
+    ///     Ok(listener) => listener,
+    ///     Err(e) => {
+    ///         println!("Can't clone listener: {}", e);
+    ///         return Ok(());
+    ///     }
+    /// };
+    ///
+    /// # Ok::<(),std::io::Error>(())
+    /// ```
     pub fn try_clone(&self) -> io::Result<UnixListener> {
         self.inner.try_clone().map(|s| s.into())
     }
 
     /// Returns the local address of of this listener.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fd_queue::UnixListener;
+    /// # use tempfile::tempdir;
+    /// # let dir = tempdir()?;
+    /// # let path = dir.path().join("mysocket");
+    ///
+    /// // let path = ...
+    /// let listener = UnixListener::bind(&path)?;
+    ///
+    /// let addr = match listener.local_addr() {
+    ///     Ok(addr) => addr,
+    ///     Err(e) => {
+    ///         println!("Couldn't get local address: {}", e);
+    ///         return Ok(());
+    ///     }
+    /// };
+    ///
+    /// # Ok::<(),std::io::Error>(())
+    /// ```
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         self.inner.local_addr()
     }
 
     /// Return the value of the `SO_ERROR` option.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fd_queue::UnixListener;
+    /// # use tempfile::tempdir;
+    /// # let dir = tempdir()?;
+    /// # let path = dir.path().join("mysocket");
+    ///
+    /// // let path = ...
+    /// let listener = UnixListener::bind(&path)?;
+    ///
+    /// let err = match listener.take_error() {
+    ///     Ok(Some(err)) => err,
+    ///     Ok(None) => {
+    ///         println!("There was no SO_ERROR option pending.");
+    ///         return Ok(());
+    ///     }
+    ///     Err(e) => {
+    ///         println!("Couldn't get the SO_ERROR option: {}", e);
+    ///         return Ok(())
+    ///     }
+    /// };
+    ///
+    /// # Ok::<(),std::io::Error>(())
+    /// ```
     pub fn take_error(&self) -> io::Result<Option<Error>> {
         self.inner.take_error()
     }
@@ -484,6 +598,34 @@ impl UnixListener {
     ///
     /// The iterator will never return `None` and also will not yield the peer's
     /// [`SocketAddr`][SocketAddr] structure.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fd_queue::UnixListener;
+    /// # use fd_queue::UnixStream;
+    /// # use std::thread;
+    /// # use tempfile::tempdir;
+    /// # let dir = tempdir()?;
+    /// # let path = dir.path().join("mysocket");
+    ///
+    /// // let path = ...
+    /// let listener = UnixListener::bind(&path)?;
+    /// # thread::spawn(move || UnixStream::connect(path).expect("Can't connect"));
+    ///
+    /// let mut incoming = listener.incoming();
+    ///
+    /// let sock = match incoming.next() {
+    ///     Some(Ok(sock)) => sock,
+    ///     Some(Err(e)) => {
+    ///         println!("Can't get the next incoming socket: {}", e);
+    ///         return Ok(());
+    ///     }
+    ///     None => unreachable!(),
+    /// };
+    ///
+    /// # Ok::<(),std::io::Error>(())
+    /// ```
     ///
     /// [SocketAddr]: https://doc.rust-lang.org/stable/std/os/unix/net/struct.SocketAddr.html
     pub fn incoming(&self) -> Incoming {
