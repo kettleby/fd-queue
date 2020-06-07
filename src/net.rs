@@ -9,14 +9,16 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::io::{self, Error, ErrorKind, IoSlice, IoSliceMut, prelude::*};
-// needed until the MSRV is 1.43 when the associated constant becomes available
-use std::isize;
 use std::mem::size_of;
 use std::net::Shutdown;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::os::unix::net::{SocketAddr, UnixListener as StdUnixListner, UnixStream as StdUnixStream};
 use std::path::Path;
 use std::slice;
+
+// needed until the MSRV is 1.43 when the associated constant becomes available
+use std::isize;
+use std::usize;
 
 use nix::cmsg_space;
 use nix::sys::socket::{recvmsg, sendmsg, ControlMessage, ControlMessageOwned, MsgFlags};
