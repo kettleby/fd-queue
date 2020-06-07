@@ -8,6 +8,7 @@ edition = "2018"
 
 [dependencies]
 nix = "0.17.0"
+tracing = "0.1.15"
 
 [dev-dependencies]
 tempfile = "3.1.0"

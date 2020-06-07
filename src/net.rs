@@ -20,6 +20,8 @@ use nix::cmsg_space;
 use nix::sys::socket::{recvmsg, sendmsg, ControlMessage, ControlMessageOwned, MsgFlags};
 use nix::sys::uio::IoVec;
 
+use tracing::{trace, warn};
+
 use crate::{EnqueueFd, DequeueFd, QueueFullError};
 
 /// A structure representing a connected Unix socket with support for passing
@@ -310,8 +312,10 @@ impl EnqueueFd for UnixStream {
     fn enqueue(&mut self, fd: &impl AsRawFd) -> std::result::Result<(), QueueFullError> {
         let outfd = self.outfd.get_or_insert_with(|| Vec::with_capacity(Self::FD_QUEUE_SIZE));
         if outfd.len() >= Self::FD_QUEUE_SIZE {
+            warn!(source = "UnixStream", event = "enqueue", condition = "full");
             Err(QueueFullError::new())
         } else {
+            trace!(source = "UnixStream", event = "enqueue", count = 1);
             outfd.push(fd.as_raw_fd());
             Ok(())
         }
@@ -327,7 +331,9 @@ impl EnqueueFd for UnixStream {
 /// [RawFd]: https://doc.rust-lang.org/stable/std/os/unix/io/type.RawFd.html
 impl DequeueFd for UnixStream {
     fn dequeue(&mut self) -> Option<RawFd> {
-        self.infd.pop_front()
+        let result = self.infd.pop_front();
+        trace!(source = "UnixStream", event = "dequeue", count = if result.is_some() {1} else {0});
+        result
     }
 }
 
@@ -383,15 +389,19 @@ impl Read for UnixStream {
         let msg = recvmsg(self.as_raw_fd(), &vecs, Some(&mut self.cmsg_buffer), MsgFlags::empty())
             .map_err(map_error)?;
         if msg.flags.contains(MsgFlags::MSG_CTRUNC) {
+            warn!(source = "UnixStream", event = "read", condition = "cmsgs truncated");
             return Err(Error::new(ErrorKind::Other, CMsgTruncatedError::new()));
         }
 
+        let mut fds_count = 0;
         for c in msg.cmsgs() {
             if let ControlMessageOwned::ScmRights(fds) = c {
                 self.infd.extend(fds);
+                fds_count += 1;
             }
         }
 
+        trace!(source = "UnixStream", event = "read", fds_count, byte_count = msg.bytes);
         Ok(msg.bytes)
     }
 }
@@ -442,11 +452,15 @@ impl Write for UnixStream {
         let outfd = self.outfd.take();
 
         let fds = outfd.unwrap_or_else(Vec::new);
+        let fds_count = fds.len();
         let cmsgs = if fds.is_empty() {
             Vec::new()
         } else {
             vec![ControlMessage::ScmRights(&fds)]
         };
+
+        let byte_count: usize = vecs.iter().map(|vec| vec.as_slice().len()).sum();
+        trace!(source = "UnixStream", event = "write", fds_count, byte_count);
 
         sendmsg(self.as_raw_fd(), &vecs, &cmsgs, MsgFlags::empty(), None)
             .map_err(map_error)
