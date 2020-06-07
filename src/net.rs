@@ -349,9 +349,35 @@ impl Read for UnixStream {
 
     fn read_vectored(&mut self, bufs: &mut [IoSliceMut]) -> io::Result<usize> {
         assert_eq!(size_of::<IoSliceMut>(), size_of::<IoVec<&mut [u8]>>());
+        assert!((isize::MAX as usize) / size_of::<IoVec<&mut [u8]>>() >= bufs.len());
 
         let bufs_ptr = bufs.as_mut_ptr();
         let vecs_ptr = bufs_ptr as *mut IoVec<&mut [u8]>;
+
+        // Safety: from_raw_parts_mut(data, len) requires 3 things
+        //
+        //      1. data is valid (i.e. non-null and pointing to a single allocated
+        //         object)
+        //      2. the memory referenced by the returned slice must not be accessed
+        //         other than through that slice for the lifetime of the slice
+        //      3. len * size_of::<T>() <= isize::MAX
+        //
+        // For the first condition, vecs_ptr is is a pointer to the first byte of the
+        // bufs slice which is bufs.len() * size_of::<IoSliceMut> bytes long. The
+        // first assertion means that it is also bufs.len() *
+        // size_of::<IoVec<&mut[u8]>> bytes long. vecs_ptr thus points to the single
+        // allocated object bufs for its whole bufs.len * size_of::<IoVec<&mut[u8]>
+        // size. Since it is pointing to the first byte of a slice, it is non-null.
+        // It is properly aligned because it is equal to bufs_ptr (which is properly
+        // aligned) and because both IoSliceMut and IoVec<&mut [u8]> are guarenteed
+        // to have the same layout, specifically the layout of iovec C ABI type.
+        //
+        // For the second condition, all of bufs, bufs_ptr, vecs_ptr, and vecs
+        // reference the same memory, but only vecs is used in any manner after this
+        // call.
+        //
+        // For the third condition, the second assertion demonstarates that it holds
+        // (absent a panic).
         let vecs = unsafe { slice::from_raw_parts_mut(vecs_ptr, bufs.len()) };
 
         let msg = recvmsg(self.as_raw_fd(), &vecs, Some(&mut self.cmsg_buffer), MsgFlags::empty())
@@ -383,9 +409,34 @@ impl Write for UnixStream {
 
     fn write_vectored(&mut self, bufs: &[IoSlice]) -> io::Result<usize> {
         assert_eq!(size_of::<IoSlice>(), size_of::<IoVec<&[u8]>>());
+        assert!((isize::MAX as usize) / size_of::<IoVec<&[u8]>>() >= bufs.len());
 
         let bufs_ptr = bufs.as_ptr();
         let vecs_ptr = bufs_ptr as *const IoVec<&[u8]>;
+
+        // Safety: from_raw_parts(data, len) requires three things:
+        //
+        //      1. data must be valid for len * size_of::<T>() bytes (non-null,
+        //         properly aligned, and the memory range from a single allocation).
+        //      2. The memory reference by the return slice must not be mutated for
+        //         the liftime of the slice.
+        //      3. len * size_of::<T>() <= isize::MAX
+        //
+        // For the first condtion vecs_ptr is non-null because it points to the first
+        // byte of bufs. It is properly aligned for IoVec<&[u8]> because it is
+        // properly aligned for IoSlice and IoVec<&[u8]> and IoSlice both have the
+        // same layout: the C ABI for an iovec. The first assertion above ensures
+        // that bufs.len() * size_of::<IoVec<&[u8]>> is the same as bufs.len() *
+        // size_of::<IoSlice> and both are the number of bytes in bufs, which is a
+        // single allocation.
+        //
+        // For the second condition, bufs, bufs_ptr, vecs, and vecs_ptr all refer to
+        // the same memory but they are all const pointers or shared references.
+        // There are no other references to that memory in this function and any such
+        // references in other functions must be through shared references (becuase
+        // bufs is a shared reference).
+        //
+        // For the third condition, the second assertion ensurse this is true.
         let vecs = unsafe { slice::from_raw_parts(vecs_ptr, bufs.len()) };
 
         let outfd = self.outfd.take();
