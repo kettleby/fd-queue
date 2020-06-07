@@ -9,6 +9,8 @@
 use std::collections::VecDeque;
 use std::fmt;
 use std::io::{self, Error, ErrorKind, IoSlice, IoSliceMut, prelude::*};
+// needed until the MSRV is 1.43 when the associated constant becomes available
+use std::isize;
 use std::mem::size_of;
 use std::net::Shutdown;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
