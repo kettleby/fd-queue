@@ -21,5 +21,8 @@
 mod net;
 mod queue;
 
-pub use net::{Incoming, UnixStream, UnixListener};
-pub use queue::{EnqueueFd, DequeueFd, QueueFullError};
+#[cfg(feature = "mio")]
+pub mod mio;
+
+pub use net::{Incoming, UnixListener, UnixStream};
+pub use queue::{DequeueFd, EnqueueFd, QueueFullError};
