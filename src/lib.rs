@@ -18,11 +18,15 @@
 
 #![deny(missing_docs, warnings)]
 
-mod net;
 mod queue;
 
-#[cfg(feature = "mio")]
+#[cfg(feature = "net-fd")]
+mod net;
+
+#[cfg(feature = "mio-fd")]
 pub mod mio;
 
+#[cfg(feature = "net-fd")]
 pub use net::{Incoming, UnixListener, UnixStream};
+
 pub use queue::{DequeueFd, EnqueueFd, QueueFullError};

@@ -5,11 +5,13 @@ authors = ["Steven Bosnick <sbosnick@sympatico.ca>"]
 edition = "2018"
 
 [features]
-default = ["mio"]
+default = ["mio-fd", "net-fd"]
+net-fd = ["nix", "tracing"]
+mio-fd = ["net-fd", "mio"]
 
 [dependencies]
-nix = "0.17.0"
-tracing = "0.1.15"
+nix = {version = "0.17.0", optional = true}
+tracing = {version = "0.1.15", optional = true}
 mio = { version = "0.7.0", optional = true, features = ["os-util"] }
 
 [dev-dependencies]
