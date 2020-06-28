@@ -8,7 +8,7 @@
 
 use std::collections::VecDeque;
 use std::fmt;
-use std::io::{self, Error, ErrorKind, IoSlice, IoSliceMut, prelude::*};
+use std::io::{self, prelude::*, Error, ErrorKind, IoSlice, IoSliceMut};
 use std::mem::size_of;
 use std::net::Shutdown;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
@@ -26,7 +26,7 @@ use nix::sys::uio::IoVec;
 
 use tracing::{trace, warn};
 
-use crate::{EnqueueFd, DequeueFd, QueueFullError};
+use crate::{DequeueFd, EnqueueFd, QueueFullError};
 
 /// A structure representing a connected Unix socket with support for passing
 /// [`RawFd`][RawFd].
@@ -97,11 +97,10 @@ pub struct Incoming<'a> {
 }
 
 #[derive(Debug)]
-struct CMsgTruncatedError { }
+struct CMsgTruncatedError {}
 
 // === impl UnixStream ===
 impl UnixStream {
-
     /// The size of the bounded queue of outbound [`RawFd`][RawFd].
     ///
     /// [RawFd]: https://doc.rust-lang.org/stable/std/os/unix/io/type.RawFd.html
@@ -314,7 +313,9 @@ impl UnixStream {
 /// [RawFd]: https://doc.rust-lang.org/stable/std/os/unix/io/type.RawFd.html
 impl EnqueueFd for UnixStream {
     fn enqueue(&mut self, fd: &impl AsRawFd) -> std::result::Result<(), QueueFullError> {
-        let outfd = self.outfd.get_or_insert_with(|| Vec::with_capacity(Self::FD_QUEUE_SIZE));
+        let outfd = self
+            .outfd
+            .get_or_insert_with(|| Vec::with_capacity(Self::FD_QUEUE_SIZE));
         if outfd.len() >= Self::FD_QUEUE_SIZE {
             warn!(source = "UnixStream", event = "enqueue", condition = "full");
             Err(QueueFullError::new())
@@ -336,7 +337,11 @@ impl EnqueueFd for UnixStream {
 impl DequeueFd for UnixStream {
     fn dequeue(&mut self) -> Option<RawFd> {
         let result = self.infd.pop_front();
-        trace!(source = "UnixStream", event = "dequeue", count = if result.is_some() {1} else {0});
+        trace!(
+            source = "UnixStream",
+            event = "dequeue",
+            count = if result.is_some() { 1 } else { 0 }
+        );
         result
     }
 }
@@ -390,10 +395,19 @@ impl Read for UnixStream {
         // (absent a panic).
         let vecs = unsafe { slice::from_raw_parts_mut(vecs_ptr, bufs.len()) };
 
-        let msg = recvmsg(self.as_raw_fd(), &vecs, Some(&mut self.cmsg_buffer), MsgFlags::empty())
-            .map_err(map_error)?;
+        let msg = recvmsg(
+            self.as_raw_fd(),
+            &vecs,
+            Some(&mut self.cmsg_buffer),
+            MsgFlags::empty(),
+        )
+        .map_err(map_error)?;
         if msg.flags.contains(MsgFlags::MSG_CTRUNC) {
-            warn!(source = "UnixStream", event = "read", condition = "cmsgs truncated");
+            warn!(
+                source = "UnixStream",
+                event = "read",
+                condition = "cmsgs truncated"
+            );
             return Err(Error::new(ErrorKind::Other, CMsgTruncatedError::new()));
         }
 
@@ -405,7 +419,12 @@ impl Read for UnixStream {
             }
         }
 
-        trace!(source = "UnixStream", event = "read", fds_count, byte_count = msg.bytes);
+        trace!(
+            source = "UnixStream",
+            event = "read",
+            fds_count,
+            byte_count = msg.bytes
+        );
         Ok(msg.bytes)
     }
 }
@@ -464,10 +483,14 @@ impl Write for UnixStream {
         };
 
         let byte_count: usize = vecs.iter().map(|vec| vec.as_slice().len()).sum();
-        trace!(source = "UnixStream", event = "write", fds_count, byte_count);
+        trace!(
+            source = "UnixStream",
+            event = "write",
+            fds_count,
+            byte_count
+        );
 
-        sendmsg(self.as_raw_fd(), &vecs, &cmsgs, MsgFlags::empty(), None)
-            .map_err(map_error)
+        sendmsg(self.as_raw_fd(), &vecs, &cmsgs, MsgFlags::empty(), None).map_err(map_error)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -495,7 +518,7 @@ impl IntoRawFd for UnixStream {
 
 impl From<StdUnixStream> for UnixStream {
     fn from(inner: StdUnixStream) -> Self {
-        Self{
+        Self {
             inner,
             infd: VecDeque::with_capacity(Self::FD_QUEUE_SIZE),
             outfd: None,
@@ -515,7 +538,6 @@ fn map_error(e: nix::Error) -> io::Error {
 
 // === impl UnixListener ===
 impl UnixListener {
-
     /// Create a new `UnixListener` bound to the specified socket.
     ///
     /// # Examples
@@ -698,9 +720,7 @@ impl UnixListener {
     ///
     /// [SocketAddr]: https://doc.rust-lang.org/stable/std/os/unix/net/struct.SocketAddr.html
     pub fn incoming(&self) -> Incoming {
-        Incoming {
-            listener: self,
-        }
+        Incoming { listener: self }
     }
 }
 
@@ -724,7 +744,7 @@ impl IntoRawFd for UnixListener {
 
 impl<'a> IntoIterator for &'a UnixListener {
     type Item = io::Result<UnixStream>;
-    type IntoIter= Incoming<'a>;
+    type IntoIter = Incoming<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.incoming()
@@ -753,17 +773,20 @@ impl Iterator for Incoming<'_> {
 // === impl CMsgTruncatedError ===
 impl CMsgTruncatedError {
     fn new() -> CMsgTruncatedError {
-        CMsgTruncatedError { }
+        CMsgTruncatedError {}
     }
 }
 
 impl fmt::Display for CMsgTruncatedError {
     fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(f, "The buffer used to receive file descriptors was too small.")
+        write!(
+            f,
+            "The buffer used to receive file descriptors was too small."
+        )
     }
 }
 
-impl std::error::Error for CMsgTruncatedError { }
+impl std::error::Error for CMsgTruncatedError {}
 
 #[cfg(test)]
 mod test {
@@ -775,7 +798,7 @@ mod test {
     use std::slice;
 
     use nix::fcntl::OFlag;
-    use nix::sys::mman::{mmap, munmap, shm_open, shm_unlink, ProtFlags, MapFlags};
+    use nix::sys::mman::{mmap, munmap, shm_open, shm_unlink, MapFlags, ProtFlags};
     use nix::sys::stat::Mode;
     use nix::unistd::{close, ftruncate};
 
@@ -789,8 +812,8 @@ mod test {
     impl Shm {
         fn new(name: &str, size: i64) -> Shm {
             let oflag = OFlag::O_CREAT | OFlag::O_RDWR;
-            let fd = shm_open(name, oflag, Mode::S_IRUSR | Mode::S_IWUSR)
-                .expect("Can't create shm.");
+            let fd =
+                shm_open(name, oflag, Mode::S_IRUSR | Mode::S_IWUSR).expect("Can't create shm.");
             ftruncate(fd, size).expect("Can't ftruncate");
             let len: usize = size as usize;
 
@@ -801,7 +824,12 @@ mod test {
                 mmap(ptr::null_mut(), len, prot, flags, fd, 0).expect("Can't mmap") as *mut u8
             };
 
-            Shm{ fd, ptr, len, name: name.to_string() }
+            Shm {
+                fd,
+                ptr,
+                len,
+                name: name.to_string(),
+            }
         }
 
         fn from_raw_fd(fd: RawFd, size: usize) -> Shm {
@@ -809,10 +837,15 @@ mod test {
             let flags = MapFlags::MAP_SHARED;
 
             let ptr = unsafe {
-                mmap(ptr::null_mut(), size, prot, flags, fd, 0). expect("Can't mmap") as *mut u8
+                mmap(ptr::null_mut(), size, prot, flags, fd, 0).expect("Can't mmap") as *mut u8
             };
 
-            Shm{ fd, ptr, len: size, name: String::new() }
+            Shm {
+                fd,
+                ptr,
+                len: size,
+                name: String::new(),
+            }
         }
     }
 
@@ -831,9 +864,7 @@ mod test {
 
     impl AsMut<[u8]> for Shm {
         fn as_mut(&mut self) -> &mut [u8] {
-            unsafe {
-                slice::from_raw_parts_mut(self.ptr, self.len)
-            }
+            unsafe { slice::from_raw_parts_mut(self.ptr, self.len) }
         }
     }
 

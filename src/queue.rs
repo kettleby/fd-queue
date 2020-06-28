@@ -22,7 +22,6 @@ use std::os::unix::io::{AsRawFd, RawFd};
 /// [RawFd]: https://doc.rust-lang.org/stable/std/os/unix/io/type.RawFd.html
 /// [Write]: https://doc.rust-lang.org/stable/std/io/trait.Write.html
 pub trait EnqueueFd {
-
     /// Enqueue `fd` for later tranmission to a different process.
     ///
     /// The caller is responsible for keeping `fd` open until after the `write()` and
@@ -41,7 +40,6 @@ pub trait EnqueueFd {
 /// [RawFd]: https://doc.rust-lang.org/stable/std/os/unix/io/type.RawFd.html
 /// [Read]: https://doc.rust-lang.org/stable/std/io/trait.Read.html
 pub trait DequeueFd {
-
     /// Dequeue a previouly transmitted [`RawFd`][RawFd].
     ///
     /// The caller is responsible for closing this `RawFd`.
@@ -59,11 +57,10 @@ pub struct QueueFullError {
 }
 
 impl QueueFullError {
-
     /// Create a new `QueueFullError`.
     #[inline]
     pub fn new() -> QueueFullError {
-        QueueFullError{
+        QueueFullError {
             _private: PhantomData,
         }
     }
@@ -75,5 +72,4 @@ impl Display for QueueFullError {
     }
 }
 
-impl Error for QueueFullError { }
-
+impl Error for QueueFullError {}
