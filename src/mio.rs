@@ -14,7 +14,7 @@ use std::convert::{TryFrom, TryInto};
 use std::io::{self, prelude::*, IoSlice, IoSliceMut};
 use std::net::Shutdown;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
-use std::os::unix::net::{SocketAddr, UnixStream as StdUnixStream};
+use std::os::unix::net::{SocketAddr, UnixListener as StdUnixListner, UnixStream as StdUnixStream};
 use std::path::Path;
 
 use mio::{event::Source, unix::SourceFd, Interest, Registry, Token};
@@ -30,7 +30,10 @@ pub struct UnixStream {
 /// A non-blocking Unix domain socket server with support for passing [`RawFd`][RawFd].
 ///
 /// [RawFd]: https://doc.rust-lang.org/stable/std/os/unix/io/type.RawFd.html
-pub struct UnixListener {}
+#[derive(Debug)]
+pub struct UnixListener {
+    inner: crate::UnixListener,
+}
 
 // === impl UnixStream ===
 impl UnixStream {
@@ -164,6 +167,98 @@ impl TryFrom<StdUnixStream> for UnixStream {
         inner.set_nonblocking(true)?;
 
         Ok(UnixStream {
+            inner: inner.into(),
+        })
+    }
+}
+
+// === impl UnixListener ===
+
+impl UnixListener {
+    /// Creates a new `UnixListener` bound to the specific path.
+    ///
+    /// The listener will be set to non-blocking mode.
+    pub fn bind(path: impl AsRef<Path>) -> io::Result<UnixListener> {
+        StdUnixListner::bind(path)?.try_into()
+    }
+
+    /// Accepts a new incoming conneciton to this listener.
+    ///
+    /// The returned stream will be set to non-blocking mode.
+    pub fn accept(&self) -> io::Result<(UnixStream, SocketAddr)> {
+        self.inner.accept().and_then(|(stream, addr)| {
+            stream.set_nonblocking(true)?;
+            Ok((UnixStream { inner: stream }, addr))
+        })
+    }
+
+    /// Returns the local socket address for this listener.
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.inner.local_addr()
+    }
+
+    /// Returns the value of the `SO_ERROR` option.
+    pub fn take_error(&self) -> io::Result<Option<io::Error>> {
+        self.inner.take_error()
+    }
+}
+
+impl AsRawFd for UnixListener {
+    fn as_raw_fd(&self) -> RawFd {
+        self.inner.as_raw_fd()
+    }
+}
+
+/// Create a `UnixListener` from a `RawFd`.
+///
+/// This does not change the `RawFd` into non-blocking mode. It assumes that any such
+/// required change has already been done.
+impl FromRawFd for UnixListener {
+    unsafe fn from_raw_fd(fd: RawFd) -> Self {
+        let inner = StdUnixListner::from_raw_fd(fd);
+        UnixListener {
+            inner: inner.into(),
+        }
+    }
+}
+
+impl IntoRawFd for UnixListener {
+    fn into_raw_fd(self) -> RawFd {
+        self.inner.into_raw_fd()
+    }
+}
+
+impl Source for UnixListener {
+    fn register(
+        &mut self,
+        registry: &Registry,
+        token: Token,
+        interests: Interest,
+    ) -> io::Result<()> {
+        SourceFd(&self.as_raw_fd()).register(registry, token, interests)
+    }
+
+    fn reregister(
+        &mut self,
+        registry: &Registry,
+        token: Token,
+        interests: Interest,
+    ) -> io::Result<()> {
+        SourceFd(&self.as_raw_fd()).reregister(registry, token, interests)
+    }
+
+    fn deregister(&mut self, registry: &Registry) -> io::Result<()> {
+        SourceFd(&self.as_raw_fd()).deregister(registry)
+    }
+}
+
+impl TryFrom<StdUnixListner> for UnixListener {
+    type Error = io::Error;
+
+    fn try_from(inner: StdUnixListner) -> Result<Self, Self::Error> {
+        inner.set_nonblocking(true)?;
+
+        Ok(UnixListener {
             inner: inner.into(),
         })
     }
