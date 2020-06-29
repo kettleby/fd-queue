@@ -17,7 +17,7 @@ use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::os::unix::net::{SocketAddr, UnixListener as StdUnixListner, UnixStream as StdUnixStream};
 use std::path::Path;
 
-use mio::{event::Source, unix::SourceFd, Interest, Registry, Token};
+use mio::{event::Evented, unix::EventedFd, Poll, PollOpt, Ready, Token};
 
 /// A non-blocking Unix stream socket with support for passing [`RawFd`][RawFd].
 ///
@@ -111,27 +111,29 @@ impl Write for UnixStream {
     }
 }
 
-impl Source for UnixStream {
+impl Evented for UnixStream {
     fn register(
-        &mut self,
-        registry: &Registry,
+        &self,
+        registry: &Poll,
         token: Token,
-        interests: Interest,
+        interests: Ready,
+        opts: PollOpt,
     ) -> io::Result<()> {
-        SourceFd(&self.as_raw_fd()).register(registry, token, interests)
+        EventedFd(&self.as_raw_fd()).register(registry, token, interests, opts)
     }
 
     fn reregister(
-        &mut self,
-        registry: &Registry,
+        &self,
+        registry: &Poll,
         token: Token,
-        interests: Interest,
+        interests: Ready,
+        opts: PollOpt,
     ) -> io::Result<()> {
-        SourceFd(&self.as_raw_fd()).reregister(registry, token, interests)
+        EventedFd(&self.as_raw_fd()).reregister(registry, token, interests, opts)
     }
 
-    fn deregister(&mut self, registry: &Registry) -> io::Result<()> {
-        SourceFd(&self.as_raw_fd()).deregister(registry)
+    fn deregister(&self, registry: &Poll) -> io::Result<()> {
+        EventedFd(&self.as_raw_fd()).deregister(registry)
     }
 }
 
@@ -228,27 +230,29 @@ impl IntoRawFd for UnixListener {
     }
 }
 
-impl Source for UnixListener {
+impl Evented for UnixListener {
     fn register(
-        &mut self,
-        registry: &Registry,
+        &self,
+        registry: &Poll,
         token: Token,
-        interests: Interest,
+        interests: Ready,
+        opts: PollOpt,
     ) -> io::Result<()> {
-        SourceFd(&self.as_raw_fd()).register(registry, token, interests)
+        EventedFd(&self.as_raw_fd()).register(registry, token, interests, opts)
     }
 
     fn reregister(
-        &mut self,
-        registry: &Registry,
+        &self,
+        registry: &Poll,
         token: Token,
-        interests: Interest,
+        interests: Ready,
+        opts: PollOpt,
     ) -> io::Result<()> {
-        SourceFd(&self.as_raw_fd()).reregister(registry, token, interests)
+        EventedFd(&self.as_raw_fd()).reregister(registry, token, interests, opts)
     }
 
-    fn deregister(&mut self, registry: &Registry) -> io::Result<()> {
-        SourceFd(&self.as_raw_fd()).deregister(registry)
+    fn deregister(&self, registry: &Poll) -> io::Result<()> {
+        EventedFd(&self.as_raw_fd()).deregister(registry)
     }
 }
 
@@ -286,12 +290,11 @@ mod tests {
 
     #[test]
     fn stream_is_ready_for_read_after_write() {
-        let mut poll = Poll::new().expect("Can't create poll.");
+        let poll = Poll::new().expect("Can't create poll.");
         let mut events = Events::with_capacity(5);
 
         let (mut sut, mut other) = UnixStream::pair().expect("Unable to create pair.");
-        poll.registry()
-            .register(&mut sut, Token(0), Interest::READABLE)
+        poll.register(&mut sut, Token(0), Ready::readable(), PollOpt::edge())
             .unwrap();
         write_to_steam(&mut other);
 
@@ -305,7 +308,7 @@ mod tests {
             }
 
             for event in &events {
-                if event.token() == Token(0) && event.is_readable() {
+                if event.token() == Token(0) && event.readiness().is_readable() {
                     return;
                 }
             }
