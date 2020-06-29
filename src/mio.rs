@@ -322,7 +322,7 @@ mod tests {
 
             match stream.write(b"hello".as_ref()) {
                 Ok(_) => return,
-                Err(e) if e.kind() == ErrorKind::WouldBlock => {}
+                Err(ref e) if e.kind() == ErrorKind::WouldBlock => {}
                 Err(_) => panic!("Unable to write to stream"),
             }
         }
