@@ -26,6 +26,9 @@ mod net;
 #[cfg(feature = "mio-fd")]
 pub mod mio;
 
+#[cfg(feature = "tokio-fd")]
+pub mod tokio;
+
 #[cfg(feature = "net-fd")]
 pub use net::{Incoming, UnixListener, UnixStream};
 
