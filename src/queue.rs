@@ -51,7 +51,7 @@ pub trait DequeueFd {
 /// Error returned when the queue of [`RawFd`][RawFd] is full.
 ///
 /// [RawFd]: https://doc.rust-lang.org/stable/std/os/unix/io/type.RawFd.html
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct QueueFullError {
     _private: PhantomData<()>,
 }
