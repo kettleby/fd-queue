@@ -12,7 +12,7 @@ use std::convert::{TryFrom, TryInto};
 use std::net::Shutdown;
 use std::os::unix::{
     io::{AsRawFd, RawFd},
-    net::SocketAddr,
+    net::{SocketAddr, UnixStream as StdUnixStream},
 };
 use std::path::Path;
 use std::pin::Pin;
@@ -23,6 +23,7 @@ use futures_util::{future::poll_fn, ready};
 use mio::Ready;
 use pin_project::pin_project;
 use tokio::io::{self, AsyncRead, AsyncWrite, PollEvented};
+use socket2::{Socket, Domain, Type, SockAddr};
 
 use crate::{DequeueFd, EnqueueFd, QueueFullError};
 
@@ -58,8 +59,20 @@ impl UnixStream {
     /// associating the returned stream with the default event loop's handle.
     ///
     /// For now, this is a synchronous function.
-    pub fn connect(path: impl AsRef<Path>) -> io::Result<UnixStream> {
-        crate::mio::UnixStream::connect(path)?.try_into()
+    pub async fn connect(path: impl AsRef<Path>) -> io::Result<UnixStream> {
+        let typ = Type::stream().non_blocking().cloexec();
+        let socket = Socket::new(Domain::unix(), typ, None)?;
+
+        let addr = SockAddr::unix(path)?;
+        match socket.connect(&addr) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+            Err(e) => return Err(e),
+        }
+
+        let stream: UnixStream = socket.into_unix_stream().try_into()?;
+        poll_fn(|cx| stream.inner.poll_write_ready(cx)).await?;
+        Ok(stream)
     }
 
     /// Creates an unnamed pair of conntected sockets.
@@ -146,6 +159,15 @@ impl TryFrom<crate::mio::UnixStream> for UnixStream {
         Ok(UnixStream {
             inner: PollEvented::new(inner)?,
         })
+    }
+}
+
+impl TryFrom<StdUnixStream> for UnixStream {
+    type Error = io::Error;
+
+    fn try_from(inner: StdUnixStream) -> Result<Self, Self::Error> {
+        let mio_stream = crate::mio::UnixStream::try_from(inner)?;
+        mio_stream.try_into()
     }
 }
 
@@ -316,7 +338,7 @@ mod tests {
 
         let mut listener = UnixListener::bind(&sock_addr).expect("Can't bind listener");
         tokio::spawn(async move {
-            let mut client = UnixStream::connect(sock_addr).expect("Can't connect to listener");
+            let mut client = UnixStream::connect(sock_addr).await.expect("Can't connect to listener");
             client
                 .write_all(b"Hello World!".as_ref())
                 .await
