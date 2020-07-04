@@ -18,10 +18,13 @@ use std::path::Path;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 
+use futures_core::stream::Stream;
+use futures_util::{future::poll_fn, ready};
+use mio::Ready;
 use pin_project::pin_project;
 use tokio::io::{self, AsyncRead, AsyncWrite, PollEvented};
 
-use crate::{mio, DequeueFd, EnqueueFd, QueueFullError};
+use crate::{DequeueFd, EnqueueFd, QueueFullError};
 
 /// A structure representing a connected Unix socket.
 ///
@@ -32,7 +35,7 @@ use crate::{mio, DequeueFd, EnqueueFd, QueueFullError};
 #[derive(Debug)]
 pub struct UnixStream {
     #[pin]
-    inner: PollEvented<mio::UnixStream>,
+    inner: PollEvented<crate::mio::UnixStream>,
 }
 
 /// A Unix socket which can accept connections from other Unix sockets.
@@ -41,7 +44,10 @@ pub struct UnixStream {
 /// implements the Stream trait, which allows you to use the listener in places that want a stream.
 /// The stream will never return None and will also not yield the peer's SocketAddr structure.
 /// Iterating over it is equivalent to calling accept in a loop.
-pub struct UnixListener {}
+#[derive(Debug)]
+pub struct UnixListener {
+    inner: PollEvented<crate::mio::UnixListener>,
+}
 
 // === impl UnixStream ===
 
@@ -53,7 +59,7 @@ impl UnixStream {
     ///
     /// For now, this is a synchronous function.
     pub fn connect(path: impl AsRef<Path>) -> io::Result<UnixStream> {
-        mio::UnixStream::connect(path)?.try_into()
+        crate::mio::UnixStream::connect(path)?.try_into()
     }
 
     /// Creates an unnamed pair of conntected sockets.
@@ -62,7 +68,7 @@ impl UnixStream {
     /// communicating back and forth between one another. Each socket will be
     /// associted with the default event loop's handle.
     pub fn pair() -> io::Result<(UnixStream, UnixStream)> {
-        let (stream1, stream2) = mio::UnixStream::pair()?;
+        let (stream1, stream2) = crate::mio::UnixStream::pair()?;
         Ok((stream1.try_into()?, stream2.try_into()?))
     }
 
@@ -133,10 +139,10 @@ impl AsyncWrite for UnixStream {
     }
 }
 
-impl TryFrom<mio::UnixStream> for UnixStream {
+impl TryFrom<crate::mio::UnixStream> for UnixStream {
     type Error = io::Error;
 
-    fn try_from(inner: mio::UnixStream) -> io::Result<UnixStream> {
+    fn try_from(inner: crate::mio::UnixStream) -> io::Result<UnixStream> {
         Ok(UnixStream {
             inner: PollEvented::new(inner)?,
         })
@@ -144,7 +150,103 @@ impl TryFrom<mio::UnixStream> for UnixStream {
 }
 
 // === impl UnixListener ===
-// TODO: implment UnixListener
+
+impl UnixListener {
+    /// Creates a new UnixListener bound to the specified path.
+    ///
+    /// This function will bind a UnixListener to the specified path and associate it
+    /// with the default event loop's handler.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if thread-local runtime is not set.
+    ///
+    /// The runtime is usually set implicitly when this function is called from a
+    /// future driven by a tokio runtime, otherwise runtime can be set explicitly
+    /// with `Handle::enter` function.
+    pub fn bind(path: impl AsRef<Path>) -> io::Result<UnixListener> {
+        crate::mio::UnixListener::bind(path)?.try_into()
+    }
+
+    /// Returns the local socket address of this listener.
+    pub fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.inner.get_ref().local_addr()
+    }
+
+    /// Returns the value of the `SO_ERROR` option.
+    pub fn take_error(&self) -> io::Result<Option<io::Error>> {
+        self.inner.get_ref().take_error()
+    }
+
+    /// Accepts a new incoming connection on this listener.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if thread-local runtime is not set.
+    ///
+    /// The runtime is usually set implicitly when this function is called from a
+    /// future driven by a tokio runtime, otherwise runtime can be set explicitly
+    /// with `Handle::enter` function.
+    pub async fn accept(&mut self) -> io::Result<(UnixStream, SocketAddr)> {
+        poll_fn(|cx| self.poll_accept(cx)).await
+    }
+
+    fn poll_accept(&self, cx: &mut Context) -> Poll<io::Result<(UnixStream, SocketAddr)>> {
+        let ready = Ready::readable();
+        ready!(self.inner.poll_read_ready(cx, ready))?;
+
+        match self.inner.get_ref().accept() {
+            Ok((socket, addr)) => Poll::Ready(Ok((socket.try_into()?, addr))),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                self.inner.clear_read_ready(cx, ready)?;
+                Poll::Pending
+            }
+            Err(e) => Poll::Ready(Err(e)),
+        }
+    }
+}
+
+impl AsRawFd for UnixListener {
+    fn as_raw_fd(&self) -> RawFd {
+        self.inner.get_ref().as_raw_fd()
+    }
+}
+
+/// Produces a continuous stream of accepted connections.
+///
+/// This is the equivalent of calling `accept()` in a loop. It will never be ready
+/// with `None`.
+///
+/// # Panics
+///
+/// Polling the stream panics if thread-local runtime is not set.
+///
+/// The runtime is usually set implicitly when this function is called from a
+/// future driven by a tokio runtime, otherwise runtime can be set explicitly
+/// with `Handle::enter` function.
+impl Stream for UnixListener {
+    type Item = io::Result<UnixStream>;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context) -> Poll<Option<Self::Item>> {
+        use Poll::{Pending, Ready};
+
+        match self.poll_accept(cx) {
+            Pending => Pending,
+            Ready(Ok((stream, _))) => Ready(Some(Ok(stream))),
+            Ready(Err(err)) => Ready(Some(Err(err))),
+        }
+    }
+}
+
+impl TryFrom<crate::mio::UnixListener> for UnixListener {
+    type Error = io::Error;
+
+    fn try_from(inner: crate::mio::UnixListener) -> io::Result<UnixListener> {
+        Ok(UnixListener {
+            inner: PollEvented::new(inner)?,
+        })
+    }
+}
 
 #[cfg(test)]
 mod tests {
@@ -154,18 +256,23 @@ mod tests {
     use std::io::{prelude::*, SeekFrom};
     use std::os::unix::io::FromRawFd as _;
 
+    use tempfile::{tempdir, tempfile};
     use tokio::prelude::*;
-    use tempfile::tempfile;
 
     #[tokio::test]
     async fn unix_stream_reads_other_sides_writes() {
-        let mut buf: [u8;12] = [0;12];
+        let mut buf: [u8; 12] = [0; 12];
 
         let (mut sut, mut other) = UnixStream::pair().expect("Can't create UnixStream's");
-        tokio::spawn( async move {
-            other.write_all(b"Hello World!".as_ref()).await.expect("Can't write to UnixStream");
+        tokio::spawn(async move {
+            other
+                .write_all(b"Hello World!".as_ref())
+                .await
+                .expect("Can't write to UnixStream");
         });
-        sut.read_exact(buf.as_mut()).await.expect("Can't read from UnixStream");
+        sut.read_exact(buf.as_mut())
+            .await
+            .expect("Can't read from UnixStream");
 
         assert_eq!(&buf, b"Hello World!");
     }
@@ -173,22 +280,54 @@ mod tests {
     #[tokio::test]
     async fn unix_stream_passes_fd() {
         let mut file1 = tempfile().expect("Can't create temp file.");
-        file1.write_all(b"Hello World!\0").expect("Can't write to temp file.");
+        file1
+            .write_all(b"Hello World!\0")
+            .expect("Can't write to temp file.");
         file1.flush().expect("Can't flush temp file.");
-        file1.seek(SeekFrom::Start(0)).expect("Couldn't seek the file.");
+        file1
+            .seek(SeekFrom::Start(0))
+            .expect("Couldn't seek the file.");
         let mut buf = [0u8];
 
         let (mut sut, mut other) = UnixStream::pair().expect("Can't create UnixStream's");
-        tokio::spawn( async move {
+        tokio::spawn(async move {
             other.enqueue(&file1).expect("Can't enqueue fd.");
-            other.write_all(b"1".as_ref()).await.expect("Can't write to UnixStream");
+            other
+                .write_all(b"1".as_ref())
+                .await
+                .expect("Can't write to UnixStream");
         });
-        sut.read_exact(buf.as_mut()).await.expect("Can't read from UnixStream");
+        sut.read_exact(buf.as_mut())
+            .await
+            .expect("Can't read from UnixStream");
         let fd = sut.dequeue().expect("Can't dequeue fd");
 
-        let mut file2 = unsafe {File::from_raw_fd(fd)};
+        let mut file2 = unsafe { File::from_raw_fd(fd) };
         let mut buf2 = Vec::new();
         file2.read_to_end(&mut buf2).expect("Can't read from file");
         assert_eq!(&buf2[..], b"Hello World!\0".as_ref());
+    }
+
+    #[tokio::test]
+    async fn unix_stream_connects_to_listner() {
+        let dir = tempdir().expect("Can't create temp dir");
+        let sock_addr = dir.as_ref().join("socket");
+        let mut buf: [u8; 12] = [0; 12];
+
+        let mut listener = UnixListener::bind(&sock_addr).expect("Can't bind listener");
+        tokio::spawn(async move {
+            let mut client = UnixStream::connect(sock_addr).expect("Can't connect to listener");
+            client
+                .write_all(b"Hello World!".as_ref())
+                .await
+                .expect("Can't write to client");
+        });
+        let (mut server, _) = listener.accept().await.expect("Can't accept on listener");
+        server
+            .read_exact(buf.as_mut())
+            .await
+            .expect("Can't read from server");
+
+        assert_eq!(&buf, b"Hello World!");
     }
 }
