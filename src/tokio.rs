@@ -22,8 +22,8 @@ use futures_core::stream::Stream;
 use futures_util::{future::poll_fn, ready};
 use mio::Ready;
 use pin_project::pin_project;
+use socket2::{Domain, SockAddr, Socket, Type};
 use tokio::io::{self, AsyncRead, AsyncWrite, PollEvented};
-use socket2::{Socket, Domain, Type, SockAddr};
 
 use crate::{DequeueFd, EnqueueFd, QueueFullError};
 
@@ -338,7 +338,9 @@ mod tests {
 
         let mut listener = UnixListener::bind(&sock_addr).expect("Can't bind listener");
         tokio::spawn(async move {
-            let mut client = UnixStream::connect(sock_addr).await.expect("Can't connect to listener");
+            let mut client = UnixStream::connect(sock_addr)
+                .await
+                .expect("Can't connect to listener");
             client
                 .write_all(b"Hello World!".as_ref())
                 .await
