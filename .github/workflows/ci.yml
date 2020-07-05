@@ -33,6 +33,13 @@ jobs:
           toolchain: ${{ matrix.rust }}
           override: true
 
+      - name: Patch Dependancies
+        if: matrix.rust = '1.39.0'
+        uses: actions-rs/cargo@v1
+        with:
+            command: update
+            args: --package remove_dir_all --precise 0.5.2
+
       - name: Check Format
         if: matrix.rust == 'stable'
         uses: actions-rs/cargo@v1
