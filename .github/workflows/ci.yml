@@ -33,7 +33,7 @@ jobs:
           toolchain: ${{ matrix.rust }}
           override: true
 
-      - name: Patch Dependancies
+      - name: Patch Dependencies
         if: matrix.rust == '1.39.0'
         uses: actions-rs/cargo@v1
         with:
