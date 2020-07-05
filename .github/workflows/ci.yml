@@ -18,7 +18,7 @@ jobs:
           - stable
           - beta
           - nightly
-          - 1.36.0
+          - 1.39.0
 
     runs-on: ubuntu-latest
 
