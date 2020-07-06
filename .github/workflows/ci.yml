@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - master
+      - alpha
 
 env:
   RUST_BACKTRACE: 1
@@ -58,3 +59,27 @@ jobs:
         with:
           command: test
 
+  release:
+      name: Semantic Release
+      if: github.event == 'push'
+      runs-on: ubuntu-latest
+      needs: ['Test stable', 'Test beta', 'Test nightly', 'Test 1.39.0']
+
+      steps:
+          - name: Checkout
+            uses: actions/checkout@v1
+
+          - name: Install Rust Stable
+            uses: actions-rs/toolchain@v1
+            with:
+                profile: minimal
+                toolchain: stable
+                override: true
+
+          - name: Semantic Release
+            uses: cycjimmy/semantic-release-action@v2
+            with:
+                semantic_version: 17.1.1
+                dry_run: true
+            env:
+                GITHUB_TOKEN: ${{ secrets.SEM_REL_GH_TOKEN }}
