@@ -61,7 +61,7 @@ jobs:
 
   release:
       name: Semantic Release
-      if: github.event == 'push'
+      if: github.event_name == 'push'
       runs-on: ubuntu-latest
       needs: ['test']
 
