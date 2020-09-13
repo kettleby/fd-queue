@@ -1,7 +1,6 @@
 name: CI
 on:
   pull_request:
-  push:
     branches:
       - master
       - alpha
@@ -25,7 +24,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v1
+        uses: actions/checkout@v2
 
       - name: Install Rust (${{ matrix.rust }})
         uses: actions-rs/toolchain@v1
@@ -59,28 +58,3 @@ jobs:
         with:
           command: test
           args: --all-features
-
-  release:
-      name: Semantic Release
-      if: github.event_name == 'push'
-      runs-on: ubuntu-latest
-      needs: ['test']
-
-      steps:
-          - name: Checkout
-            uses: actions/checkout@v1
-
-          - name: Install Rust Stable
-            uses: actions-rs/toolchain@v1
-            with:
-                profile: minimal
-                toolchain: stable
-                override: true
-
-          - name: Semantic Release
-            uses: cycjimmy/semantic-release-action@v2
-            with:
-                semantic_version: 17.1.1
-                dry_run: true
-            env:
-                GITHUB_TOKEN: ${{ secrets.SEM_REL_GH_TOKEN }}
