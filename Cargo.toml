@@ -5,7 +5,6 @@ authors = ["Steven Bosnick <sbosnick@sympatico.ca>"]
 edition = "2018"
 
 [features]
-default = ["mio-fd", "net-fd", "tokio-fd"]
 net-fd = ["nix", "tracing"]
 mio-fd = ["net-fd", "mio"]
 tokio-fd = ["mio-fd", "tokio", "socket2", "pin-project", "futures-core", "futures-util"]
