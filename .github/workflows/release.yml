@@ -68,7 +68,7 @@ jobs:
                     [skip ci]
 
           - name: Merge Pull Request
-            uses: sudo-bot/action-pull-request-merge@v1.1
+            uses: sudo-bot/action-pull-request-merge@v1.1.1
             if: steps.semantic.outputs.new_release_published == 'true'
             with:
                 github-token: ${{ secrets.GITHUB_TOKEN }}
