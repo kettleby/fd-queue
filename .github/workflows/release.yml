@@ -16,6 +16,8 @@ jobs:
         steps:
           - name: Checkout
             uses: actions/checkout@v2
+            with:
+                fetch-depth: 0
 
           - name: Install Rust Stable
             uses: actions-rs/toolchain@v1
@@ -23,6 +25,11 @@ jobs:
                 profile: minimal
                 toolchain: stable
                 override: true
+
+          - name: Install Semantic Release Rust
+            uses: actions-rs/install@v0.1
+            with:
+                crate: semantic-release-rust
 
           - name: Stable Test
             uses: actions-rs/cargo@v1
@@ -32,10 +39,38 @@ jobs:
 
           - name: Semantic Release
             uses: cycjimmy/semantic-release-action@v2
+            id: semantic
             with:
                 semantic_version: 17.1.1
                 dry_run: true
+                extra_plugins: |
+                    @semantic-release/exec@5.0
             env:
                 GITHUB_TOKEN: ${{ secrets.SEM_REL_GH_TOKEN }}
+                CARGO_REGISTRY_TOKEN: ${{ secrets.SEMREL_CRATES_IO }}
+
+          - name: Create Pull Request
+            uses: peter-evans/create-pull-request@v3.1.0
+            if: steps.semantic.outputs.new_release_published == 'true'
+            id: create-pr
+            with:
+                commit-message: 'chore(release): version ${{ steps.semantic.outputs.new_release_version }}'
+                committer: sbosnick-bot <sbosnick@gmail.com>
+                author: sbosnick-bot <sbosnick@gmail.com>
+                branch: release-bot/${{ steps.semantic.outputs.new_release_version }}
+                labels: "automerge"
+                title: 'chore(release): version ${{ steps.semantic.outputs.new_release_version }}'
+                body: >
+                    Version bump in Crates.io files for release
+                    [${{ steps.semantic.outputs.new_release_version }}](https://github.com/${{ github.repository }}/releases/tag/v${{ steps.semantic.outputs.new_release_version }})
 
 
+                    [skip ci]
+
+          - name: Merge Pull Request
+            uses: sudo-bot/action-pull-request-merge@v1.1
+            if: steps.semantic.outputs.new_release_published == 'true'
+            with:
+                github-token: ${{ secrets.GITHUB_TOKEN }}
+                number: ${{ steps.create-pr.outputs.pull-request-number }}
+                merge-method: squash
