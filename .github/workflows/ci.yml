@@ -21,6 +21,7 @@ jobs:
           - 1.39.0
 
     runs-on: ubuntu-latest
+    if: github.actor != 'sbosnick-bot'
 
     steps:
       - name: Checkout
