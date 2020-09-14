@@ -5,6 +5,7 @@
 [![CI](https://github.com/sbosnick/fd-queue/workflows/CI/badge.svg)](https://github.com/sbosnick/fd-queue/actions?query=workflow%3ACI)
 ---
 
+
 fd-queue provides traits for enqueuing and dequeuing file descriptors and
 implementations of those traits for different types of unix sockets.
 Specifically fd-queue provides a blocking implementation, a non-blocking
