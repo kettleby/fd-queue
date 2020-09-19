@@ -3,6 +3,12 @@ name = "fd-queue"
 version = "0.1.0"
 authors = ["Steven Bosnick <sbosnick@sympatico.ca>"]
 edition = "2018"
+description = "A library to support fd passing on Unix sockets."
+readme = "README.md"
+repository = "https://github.com/sbosnick/fd-queue"
+license = "MIT OR Apache-2.0"
+keywords = ["fd", "unix", "socket", "domain"]
+categories = ["asynchronous", "os::unix-apis"]
 
 [features]
 net-fd = ["nix", "tracing"]
