@@ -70,7 +70,7 @@ jobs:
 
           - name: Merge Pull Request
             uses: sudo-bot/action-pull-request-merge@v1.1.1
-            if: steps.semantic.outputs.new_release_published == 'true'
+            if: steps.semantic.outputs.new_release_published == 'true' && steps.create-pr.outputs.pull-request-number != ''
             with:
                 github-token: ${{ secrets.GITHUB_TOKEN }}
                 number: ${{ steps.create-pr.outputs.pull-request-number }}
