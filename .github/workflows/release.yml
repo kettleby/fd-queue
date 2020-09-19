@@ -27,9 +27,10 @@ jobs:
                 override: true
 
           - name: Install Semantic Release Rust
-            uses: actions-rs/install@v0.1
+            uses: actions-rs/cargo@v1
             with:
-                crate: semantic-release-rust
+                command: install
+                args: --git https://github.com/sbosnick/semantic-release-rust --tag v1.0.0-alpha.5
 
           - name: Stable Test
             uses: actions-rs/cargo@v1
