@@ -2,7 +2,11 @@
 
 **FD Queue is a Rust abstraction for passing file descriptors between processes.**
 
-[![CI](https://github.com/sbosnick/fd-queue/workflows/CI/badge.svg)](https://github.com/sbosnick/fd-queue/actions?query=workflow%3ACI)
+[![CI](https://github.com/kettleby/fd-queue/workflows/CI/badge.svg)](https://github.com/kettleby/fd-queue/actions?query=workflow%3ACI)
+[![doc](https://docs.rs/fd-queue/badge.svg)](https://docs.rs/fd-queue)
+[![Crates.io](https://img.shields.io/crates/v/fd-queue)](https://crates.io/crates/fd-queue)
+[![Release](https://img.shields.io/github/v/release/kettleby/fd-queue?include_prereleases&sort=semver)](https://github.com/kettleby/fd-queue/releases)
+[![semantic-release](https://img.shields.io/badge/%20%20%F0%9F%93%A6%F0%9F%9A%80-semantic--release-e10079.svg)](https://github.com/semantic-release/semantic-release)
 ---
 
 fd-queue provides traits for enqueuing and dequeuing file descriptors and
@@ -57,7 +61,7 @@ types. With the default features there will be no implementations of the basic
 traits. To include implementations of the traits enable the following features:
 
 | Feature  | Implementation | Additional Traits          |
-----------------------------------------------------------
+|----------|----------------|----------------------------|
 | net-fd   | blocking       | `Read`, `Write`            |
 | mio-fd   | non-blocking   | `Read`, `Write`, `Evented` |
 | tokio-fd | non-blocking   | `AsyncRead`, `AsyncWrite`  |
