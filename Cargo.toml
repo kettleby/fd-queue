@@ -5,7 +5,7 @@ authors = ["Steven Bosnick <sbosnick@sympatico.ca>"]
 edition = "2018"
 description = "A library to support fd passing on Unix sockets."
 readme = "README.md"
-repository = "https://github.com/sbosnick/fd-queue"
+repository = "https://github.com/kettleby/fd-queue
 license = "MIT OR Apache-2.0"
 keywords = ["fd", "unix", "socket", "domain"]
 categories = ["asynchronous", "os::unix-apis"]
@@ -29,3 +29,7 @@ socket2 = {version = "0.3.12", optional = true, features = ["unix"]}
 tempfile = "3.1.0"
 assert_matches = "1.3.0"
 tokio = {version = "0.2.21", features = ["rt-threaded", "macros"]}
+
+[package.metadata.doc.rs]
+all-features = true
+targets = ["x86_64-unknown-linux-gnu"]
