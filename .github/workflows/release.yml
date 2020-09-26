@@ -33,7 +33,7 @@ jobs:
             uses: actions-rs/cargo@v1
             with:
                 command: install
-                args: --git https://github.com/kettleby/semantic-release-rust --tag v1.0.0-alpha.6
+                args: --version v1.0.0-alpha.6
 
           - name: Stable Test
             uses: actions-rs/cargo@v1
