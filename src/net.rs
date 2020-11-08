@@ -9,9 +9,8 @@
 use std::{
     collections::VecDeque,
     fmt,
-    iter,
     io::{self, prelude::*, Error, ErrorKind, IoSlice, IoSliceMut},
-    mem,
+    iter, mem,
     net::Shutdown,
     ops::Neg,
     os::unix::{
@@ -19,8 +18,7 @@ use std::{
         net::{SocketAddr, UnixListener as StdUnixListner, UnixStream as StdUnixStream},
     },
     path::Path,
-    ptr,
-    slice,
+    ptr, slice,
 };
 
 // needed until the MSRV is 1.43 when the associated constant becomes available
@@ -317,10 +315,12 @@ impl UnixStream {
         self.inner.set_nonblocking(nonblocking)
     }
 
-    fn send_fds(&self, bufs: &[IoSlice], fds: impl Iterator<Item=RawFd>) -> io::Result<usize> {
+    fn send_fds(&self, bufs: &[IoSlice], fds: impl Iterator<Item = RawFd>) -> io::Result<usize> {
         // Safety: CMSG_SPACE() is safe
-        debug_assert_eq!(constants::CMSG_SCM_RIGHTS_SPACE, unsafe {libc::CMSG_SPACE((constants::MAX_FD_COUNT*mem::size_of::<RawFd>()) as _)});
-        assert!( Self::FD_QUEUE_SIZE <= constants::MAX_FD_COUNT );
+        debug_assert_eq!(constants::CMSG_SCM_RIGHTS_SPACE, unsafe {
+            libc::CMSG_SPACE((constants::MAX_FD_COUNT * mem::size_of::<RawFd>()) as _)
+        });
+        assert!(Self::FD_QUEUE_SIZE <= constants::MAX_FD_COUNT);
 
         // Size the buffer to be big enough to hold MAX_FD_COUNT RawFd's.
         // The assertions above ensure that this is the case. The buffer
@@ -370,7 +370,7 @@ impl UnixStream {
             }
 
             // Safety: pmhdr points within cmsg_buffer (see above).
-            (*pmhdr).cmsg_len = libc::CMSG_LEN((count*mem::size_of::<RawFd>()) as u32) as usize;
+            (*pmhdr).cmsg_len = libc::CMSG_LEN((count * mem::size_of::<RawFd>()) as u32) as usize;
             (*pmhdr).cmsg_level = libc::SOL_SOCKET;
             (*pmhdr).cmsg_type = libc::SCM_RIGHTS;
 
@@ -383,7 +383,8 @@ impl UnixStream {
             mhdr.msg_controllen = 0;
         } else {
             // Safety: CMSG_SPACE is safe
-            mhdr.msg_controllen = unsafe { libc::CMSG_SPACE((count*mem::size_of::<RawFd>()) as u32) as usize };
+            mhdr.msg_controllen =
+                unsafe { libc::CMSG_SPACE((count * mem::size_of::<RawFd>()) as u32) as usize };
         }
 
         // Safety: mhdr has been properly prepared above.
@@ -451,7 +452,10 @@ impl Read for UnixStream {
     }
 
     fn read_vectored(&mut self, bufs: &mut [IoSliceMut]) -> io::Result<usize> {
-        assert_eq!(mem::size_of::<IoSliceMut>(), mem::size_of::<IoVec<&mut [u8]>>());
+        assert_eq!(
+            mem::size_of::<IoSliceMut>(),
+            mem::size_of::<IoVec<&mut [u8]>>()
+        );
         assert!((isize::MAX as usize) / mem::size_of::<IoVec<&mut [u8]>>() >= bufs.len());
 
         let bufs_ptr = bufs.as_mut_ptr();
@@ -850,7 +854,7 @@ mod constants {
 fn call_res<F, R>(f: F) -> Result<R, io::Error>
 where
     F: Fn() -> R,
-    R: One+Neg<Output=R>+PartialEq,
+    R: One + Neg<Output = R> + PartialEq,
 {
     let res = f();
     if res == -R::one() {

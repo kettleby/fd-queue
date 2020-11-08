@@ -6,11 +6,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms
 
-use std::{
-    os::unix::io::RawFd,
-    mem,
-    io::Write,
-    env::var_os, path::Path, fs::File, io::BufWriter};
+use std::{env::var_os, fs::File, io::BufWriter, io::Write, mem, os::unix::io::RawFd, path::Path};
 
 use libc::c_uint;
 
@@ -18,7 +14,8 @@ const MAX_FD_COUNT: usize = 10;
 
 fn main() {
     // Safety: CMSG_SPACE is safe
-    let scm_rights_space = unsafe {libc::CMSG_SPACE((MAX_FD_COUNT * mem::size_of::<RawFd>()) as c_uint)};
+    let scm_rights_space =
+        unsafe { libc::CMSG_SPACE((MAX_FD_COUNT * mem::size_of::<RawFd>()) as c_uint) };
 
     let path = var_os("OUT_DIR")
         .map(|s| Path::new(&s).join("constants.rs"))
@@ -27,11 +24,15 @@ fn main() {
         .map(BufWriter::new)
         .expect("Can't create constants.rs file");
 
-    write!(output, "/// the result of `libc::CMSG_SPACE()` for `MAX_FD_COUNT` `RawFd`'s\n\
-                    pub const CMSG_SCM_RIGHTS_SPACE: libc::c_uint = {};\n\
-                    \n\
-                    /// the maximum number of `RawFd`'s to transfer in a single call to \n\
-                    /// `libc::sendmsg` or `libc::recvmsg`.\n\
-                    pub const MAX_FD_COUNT: usize = {};\n", scm_rights_space, MAX_FD_COUNT)
-        .expect("Can't write to constants.rs");
+    write!(
+        output,
+        "/// the result of `libc::CMSG_SPACE()` for `MAX_FD_COUNT` `RawFd`'s\n\
+         pub const CMSG_SCM_RIGHTS_SPACE: libc::c_uint = {};\n\
+         \n\
+         /// the maximum number of `RawFd`'s to transfer in a single call to \n\
+         /// `libc::sendmsg` or `libc::recvmsg`.\n\
+         pub const MAX_FD_COUNT: usize = {};\n",
+        scm_rights_space, MAX_FD_COUNT
+    )
+    .expect("Can't write to constants.rs");
 }
