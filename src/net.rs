@@ -8,12 +8,15 @@
 
 use std::collections::VecDeque;
 use std::fmt;
+use std::iter;
 use std::io::{self, prelude::*, Error, ErrorKind, IoSlice, IoSliceMut};
-use std::mem::size_of;
+use std::mem::{self, size_of};
 use std::net::Shutdown;
+use std::ops::Neg;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
 use std::os::unix::net::{SocketAddr, UnixListener as StdUnixListner, UnixStream as StdUnixStream};
 use std::path::Path;
+use std::ptr;
 use std::slice;
 
 // needed until the MSRV is 1.43 when the associated constant becomes available
@@ -21,8 +24,10 @@ use std::isize;
 use std::usize;
 
 use nix::cmsg_space;
-use nix::sys::socket::{recvmsg, sendmsg, ControlMessage, ControlMessageOwned, MsgFlags};
+use nix::sys::socket::{recvmsg, ControlMessageOwned, MsgFlags};
 use nix::sys::uio::IoVec;
+
+use num_traits::One;
 
 use tracing::{trace, warn};
 
@@ -303,8 +308,83 @@ impl UnixStream {
         self.inner.shutdown(how)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
         self.inner.set_nonblocking(nonblocking)
+    }
+
+    fn send_fds(&self, bufs: &[IoSlice], fds: impl Iterator<Item=RawFd>) -> io::Result<usize> {
+        // Safety: CMSG_SPACE() is safe
+        debug_assert_eq!(constants::CMSG_SCM_RIGHTS_SPACE, unsafe {libc::CMSG_SPACE((constants::MAX_FD_COUNT*mem::size_of::<RawFd>()) as _)});
+        assert!( Self::FD_QUEUE_SIZE <= constants::MAX_FD_COUNT );
+
+        // Size the buffer to be big enough to hold MAX_FD_COUNT RawFd's.
+        // The assertions above ensure that this is the case. The buffer
+        // must be zeroed because subsequent code will not clear padding
+        // bytes.
+        let mut cmsg_buffer = [0u8; constants::CMSG_SCM_RIGHTS_SPACE as _];
+
+        // Initialize the msghdr
+        let mut mhdr = unsafe {
+            // msghdr may have private members for padding. This ensures that they are zeroed.
+            let mut mhdr = mem::MaybeUninit::<libc::msghdr>::zeroed();
+            // Safety: we don't turn p into a reference or read from it
+            let p = mhdr.as_mut_ptr();
+            (*p).msg_name = ptr::null_mut();
+            (*p).msg_namelen = 0;
+            // Trasmute bufs into a mutable pointer. sendmsg doesn't really mutate
+            // the buffer but the standard says that it takes a mutable pointer.
+            // This also relies on the guarentee given by IoSlice that it is ABI
+            // compatible with iovec.
+            (*p).msg_iov = bufs.as_ptr() as *mut _;
+            (*p).msg_iovlen = bufs.len();
+            (*p).msg_control = cmsg_buffer.as_mut_ptr() as _;
+            (*p).msg_controllen = constants::CMSG_SCM_RIGHTS_SPACE as _;
+            (*p).msg_flags = 0;
+            // Safety: we have initalized all 7 fields of mhdr and zeroed the padding
+            mhdr.assume_init()
+        };
+
+        // Encode the cmsg_buffer
+        let count = unsafe {
+            // Safety: mhdr has been propery initialized.
+            let pmhdr: *mut libc::cmsghdr = libc::CMSG_FIRSTHDR(&mhdr as *const libc::msghdr);
+            assert_ne!(pmhdr, ptr::null_mut());
+
+            // note that p_fd may not be properly aligned so should not be dereference directly
+            let mut p_fd = libc::CMSG_DATA(pmhdr) as *mut RawFd;
+            let mut count = 0;
+            for fd in fds.take(Self::FD_QUEUE_SIZE) {
+                // Safety: p_fd points within cmsg_buffer since pmhdr points to
+                // the first cmmsghdr in msghdr which was initialized to cmsg_buffer.
+                // cmsg_buffer is set to be large enough to hold MAX_FD_COUNT RawFd's
+                // and we are looping over the first FD_QUEUE_SIZE fds. At the top
+                // we assert that FD_QUEUE_SIZE <= MAX_FD_COUNT.
+                p_fd.write_unaligned(fd);
+                p_fd = p_fd.offset(1);
+                count += 1;
+            }
+
+            // Safety: pmhdr points within cmsg_buffer (see above).
+            (*pmhdr).cmsg_len = libc::CMSG_LEN((count*mem::size_of::<RawFd>()) as u32) as usize;
+            (*pmhdr).cmsg_level = libc::SOL_SOCKET;
+            (*pmhdr).cmsg_type = libc::SCM_RIGHTS;
+
+            count
+        };
+
+        // Adjust msg_control and msg_controllen now that we know the count
+        if count == 0 {
+            mhdr.msg_control = ptr::null_mut();
+            mhdr.msg_controllen = 0;
+        } else {
+            // Safety: CMSG_SPACE is safe
+            mhdr.msg_controllen = unsafe { libc::CMSG_SPACE((count*mem::size_of::<RawFd>()) as u32) as usize };
+        }
+
+        // Safety: mhdr has been properly prepared above.
+        call_res(|| unsafe { libc::sendmsg(self.as_raw_fd(), &mhdr as *const libc::msghdr, 0) })
+            .map(|r| r as usize)
     }
 }
 
@@ -445,48 +525,10 @@ impl Write for UnixStream {
     }
 
     fn write_vectored(&mut self, bufs: &[IoSlice]) -> io::Result<usize> {
-        assert_eq!(size_of::<IoSlice>(), size_of::<IoVec<&[u8]>>());
-        assert!((isize::MAX as usize) / size_of::<IoVec<&[u8]>>() >= bufs.len());
-
-        let bufs_ptr = bufs.as_ptr();
-        let vecs_ptr = bufs_ptr as *const IoVec<&[u8]>;
-
-        // Safety: from_raw_parts(data, len) requires three things:
-        //
-        //      1. data must be valid for len * size_of::<T>() bytes (non-null,
-        //         properly aligned, and the memory range from a single allocation).
-        //      2. The memory reference by the return slice must not be mutated for
-        //         the liftime of the slice.
-        //      3. len * size_of::<T>() <= isize::MAX
-        //
-        // For the first condtion vecs_ptr is non-null because it points to the first
-        // byte of bufs. It is properly aligned for IoVec<&[u8]> because it is
-        // properly aligned for IoSlice and IoVec<&[u8]> and IoSlice both have the
-        // same layout: the C ABI for an iovec. The first assertion above ensures
-        // that bufs.len() * size_of::<IoVec<&[u8]>> is the same as bufs.len() *
-        // size_of::<IoSlice> and both are the number of bytes in bufs, which is a
-        // single allocation.
-        //
-        // For the second condition, bufs, bufs_ptr, vecs, and vecs_ptr all refer to
-        // the same memory but they are all const pointers or shared references.
-        // There are no other references to that memory in this function and any such
-        // references in other functions must be through shared references (becuase
-        // bufs is a shared reference).
-        //
-        // For the third condition, the second assertion ensurse this is true.
-        let vecs = unsafe { slice::from_raw_parts(vecs_ptr, bufs.len()) };
-
         let outfd = self.outfd.take();
 
-        let fds = outfd.unwrap_or_else(Vec::new);
-        let fds_count = fds.len();
-        let cmsgs = if fds.is_empty() {
-            Vec::new()
-        } else {
-            vec![ControlMessage::ScmRights(&fds)]
-        };
-
-        let byte_count: usize = vecs.iter().map(|vec| vec.as_slice().len()).sum();
+        let byte_count: usize = bufs.iter().map(|iov| iov.len()).sum();
+        let fds_count = outfd.as_ref().map_or(0, |fds| fds.len());
         trace!(
             source = "UnixStream",
             event = "write",
@@ -494,7 +536,10 @@ impl Write for UnixStream {
             byte_count
         );
 
-        sendmsg(self.as_raw_fd(), &vecs, &cmsgs, MsgFlags::empty(), None).map_err(map_error)
+        match outfd {
+            Some(mut fds) => self.send_fds(bufs, fds.drain(..)),
+            None => self.send_fds(bufs, iter::empty()),
+        }
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -791,6 +836,25 @@ impl fmt::Display for CMsgTruncatedError {
 }
 
 impl std::error::Error for CMsgTruncatedError {}
+
+// === precomputed constants generated by build.rs ===
+mod constants {
+    include!(concat!(env!("OUT_DIR"), "/constants.rs"));
+}
+
+// === utility functions ===
+fn call_res<F, R>(f: F) -> Result<R, io::Error>
+where
+    F: Fn() -> R,
+    R: One+Neg<Output=R>+PartialEq,
+{
+    let res = f();
+    if res == -R::one() {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(res)
+    }
+}
 
 #[cfg(test)]
 mod test {
