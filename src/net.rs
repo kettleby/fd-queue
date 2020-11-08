@@ -6,18 +6,22 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms
 
-use std::collections::VecDeque;
-use std::fmt;
-use std::iter;
-use std::io::{self, prelude::*, Error, ErrorKind, IoSlice, IoSliceMut};
-use std::mem::{self, size_of};
-use std::net::Shutdown;
-use std::ops::Neg;
-use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
-use std::os::unix::net::{SocketAddr, UnixListener as StdUnixListner, UnixStream as StdUnixStream};
-use std::path::Path;
-use std::ptr;
-use std::slice;
+use std::{
+    collections::VecDeque,
+    fmt,
+    iter,
+    io::{self, prelude::*, Error, ErrorKind, IoSlice, IoSliceMut},
+    mem,
+    net::Shutdown,
+    ops::Neg,
+    os::unix::{
+        io::{AsRawFd, FromRawFd, IntoRawFd, RawFd},
+        net::{SocketAddr, UnixListener as StdUnixListner, UnixStream as StdUnixStream},
+    },
+    path::Path,
+    ptr,
+    slice,
+};
 
 // needed until the MSRV is 1.43 when the associated constant becomes available
 use std::isize;
@@ -447,8 +451,8 @@ impl Read for UnixStream {
     }
 
     fn read_vectored(&mut self, bufs: &mut [IoSliceMut]) -> io::Result<usize> {
-        assert_eq!(size_of::<IoSliceMut>(), size_of::<IoVec<&mut [u8]>>());
-        assert!((isize::MAX as usize) / size_of::<IoVec<&mut [u8]>>() >= bufs.len());
+        assert_eq!(mem::size_of::<IoSliceMut>(), mem::size_of::<IoVec<&mut [u8]>>());
+        assert!((isize::MAX as usize) / mem::size_of::<IoVec<&mut [u8]>>() >= bufs.len());
 
         let bufs_ptr = bufs.as_mut_ptr();
         let vecs_ptr = bufs_ptr as *mut IoVec<&mut [u8]>;
