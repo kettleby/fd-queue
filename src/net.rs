@@ -18,16 +18,12 @@ use std::{
         net::{SocketAddr, UnixListener as StdUnixListner, UnixStream as StdUnixStream},
     },
     path::Path,
-    ptr, slice,
+    ptr,
 };
 
 // needed until the MSRV is 1.43 when the associated constant becomes available
 use std::isize;
 use std::usize;
-
-use nix::cmsg_space;
-use nix::sys::socket::{recvmsg, ControlMessageOwned, MsgFlags};
-use nix::sys::uio::IoVec;
 
 use num_traits::One;
 
@@ -83,7 +79,6 @@ pub struct UnixStream {
     inner: StdUnixStream,
     infd: VecDeque<RawFd>,
     outfd: Option<Vec<RawFd>>,
-    cmsg_buffer: Vec<u8>,
 }
 
 /// A structure representing a Unix domain socket server whose connected sockets
@@ -105,6 +100,13 @@ pub struct Incoming<'a> {
 
 #[derive(Debug)]
 struct CMsgTruncatedError {}
+
+#[derive(Debug)]
+struct PushFailureError {}
+
+trait Push<A> {
+    fn push(&mut self, item: A) -> Result<(), A>;
+}
 
 // === impl UnixStream ===
 impl UnixStream {
@@ -388,8 +390,80 @@ impl UnixStream {
         }
 
         // Safety: mhdr has been properly prepared above.
-        call_res(|| unsafe { libc::sendmsg(self.as_raw_fd(), &mhdr as *const libc::msghdr, 0) })
-            .map(|r| r as usize)
+        call_res(|| unsafe { libc::sendmsg(self.as_raw_fd(), &mhdr, 0) }).map(|r| r as usize)
+    }
+}
+
+fn recv_fds(
+    fd: RawFd,
+    bufs: &mut [IoSliceMut],
+    fds_sink: &mut impl Push<RawFd>,
+) -> io::Result<usize> {
+    // Safety: CMSG_SPACE is safe
+    debug_assert_eq!(constants::CMSG_SCM_RIGHTS_SPACE, unsafe {
+        libc::CMSG_SPACE((constants::MAX_FD_COUNT * mem::size_of::<RawFd>()) as _)
+    });
+
+    // Size the buffer to be big enough to hold MAX_FD_COUNT RawFd's.
+    // The assertion above ensure that this is the case.
+    let mut cmsg_buffer = [0u8; constants::CMSG_SCM_RIGHTS_SPACE as _];
+
+    // Initialize the msghdr
+    let mut mhdr = unsafe {
+        // msghdr may have private members for padding. This ensures that they are zeroed.
+        let mut mhdr = mem::MaybeUninit::<libc::msghdr>::zeroed();
+        // Safety: we don't turn p into a reference or read from it
+        let p = mhdr.as_mut_ptr();
+        (*p).msg_name = ptr::null_mut();
+        (*p).msg_namelen = 0;
+        // This relies on IoSliceMut's guarentee that it is ABI compatible with iovec.
+        (*p).msg_iov = bufs.as_mut_ptr() as _;
+        (*p).msg_iovlen = bufs.len();
+        (*p).msg_control = cmsg_buffer.as_mut_ptr() as _;
+        (*p).msg_controllen = constants::CMSG_SCM_RIGHTS_SPACE as _;
+        (*p).msg_flags = 0;
+        // Safety: we have initalized all 7 fields of mhdr and zeroed the padding
+        mhdr.assume_init()
+    };
+
+    // Safety: we have properly initalized mhdr including its 3 internal pointers
+    // each with a correct msg_*len value describing the pointed to buffer's lenght.
+    let ret = call_res(|| unsafe { libc::recvmsg(fd, &mut mhdr, 0) }).map(|r| r as usize)?;
+
+    let mut fds_count = 0;
+
+    // Safety: mhdr was properly initalized and then passed to recvmsg.
+    let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(&mhdr) };
+    while cmsg != ptr::null_mut() {
+        // Safety: cmsg is check to be non-null; it points to a valid cmsg
+        // because it is from a call to either CMSG_FIRSTHDR or CMSG_NXTHDR.
+
+        // TODO: deal with closing any remaining fd's in cmsg's after the one with
+        // the first error.
+        fds_count += unsafe { copy_fds(cmsg, fds_sink) }?;
+
+        // Safety: mhdr was properly initalized and passed to recvmsg; cmsg
+        // was set to a correct call to either CMSG_FIRSTHDR or CMSG_NXTHDR.
+        cmsg = unsafe { libc::CMSG_NXTHDR(&mhdr, cmsg) };
+    }
+
+    if (mhdr.msg_flags & libc::MSG_CTRUNC) != 0 {
+        warn!(
+            source = "UnixStream",
+            event = "read",
+            condition = "cmsgs truncated"
+        );
+
+        Err(Error::new(ErrorKind::Other, CMsgTruncatedError::new()))
+    } else {
+        trace!(
+            source = "UnixStream",
+            event = "read",
+            fds_count,
+            byte_count = ret
+        );
+
+        Ok(ret)
     }
 }
 
@@ -452,72 +526,7 @@ impl Read for UnixStream {
     }
 
     fn read_vectored(&mut self, bufs: &mut [IoSliceMut]) -> io::Result<usize> {
-        assert_eq!(
-            mem::size_of::<IoSliceMut>(),
-            mem::size_of::<IoVec<&mut [u8]>>()
-        );
-        assert!((isize::MAX as usize) / mem::size_of::<IoVec<&mut [u8]>>() >= bufs.len());
-
-        let bufs_ptr = bufs.as_mut_ptr();
-        let vecs_ptr = bufs_ptr as *mut IoVec<&mut [u8]>;
-
-        // Safety: from_raw_parts_mut(data, len) requires 3 things
-        //
-        //      1. data is valid (i.e. non-null and pointing to a single allocated
-        //         object)
-        //      2. the memory referenced by the returned slice must not be accessed
-        //         other than through that slice for the lifetime of the slice
-        //      3. len * size_of::<T>() <= isize::MAX
-        //
-        // For the first condition, vecs_ptr is is a pointer to the first byte of the
-        // bufs slice which is bufs.len() * size_of::<IoSliceMut> bytes long. The
-        // first assertion means that it is also bufs.len() *
-        // size_of::<IoVec<&mut[u8]>> bytes long. vecs_ptr thus points to the single
-        // allocated object bufs for its whole bufs.len * size_of::<IoVec<&mut[u8]>
-        // size. Since it is pointing to the first byte of a slice, it is non-null.
-        // It is properly aligned because it is equal to bufs_ptr (which is properly
-        // aligned) and because both IoSliceMut and IoVec<&mut [u8]> are guarenteed
-        // to have the same layout, specifically the layout of iovec C ABI type.
-        //
-        // For the second condition, all of bufs, bufs_ptr, vecs_ptr, and vecs
-        // reference the same memory, but only vecs is used in any manner after this
-        // call.
-        //
-        // For the third condition, the second assertion demonstarates that it holds
-        // (absent a panic).
-        let vecs = unsafe { slice::from_raw_parts_mut(vecs_ptr, bufs.len()) };
-
-        let msg = recvmsg(
-            self.as_raw_fd(),
-            &vecs,
-            Some(&mut self.cmsg_buffer),
-            MsgFlags::empty(),
-        )
-        .map_err(map_error)?;
-        if msg.flags.contains(MsgFlags::MSG_CTRUNC) {
-            warn!(
-                source = "UnixStream",
-                event = "read",
-                condition = "cmsgs truncated"
-            );
-            return Err(Error::new(ErrorKind::Other, CMsgTruncatedError::new()));
-        }
-
-        let mut fds_count = 0;
-        for c in msg.cmsgs() {
-            if let ControlMessageOwned::ScmRights(fds) = c {
-                self.infd.extend(fds);
-                fds_count += 1;
-            }
-        }
-
-        trace!(
-            source = "UnixStream",
-            event = "read",
-            fds_count,
-            byte_count = msg.bytes
-        );
-        Ok(msg.bytes)
+        recv_fds(self.as_raw_fd(), bufs, &mut self.infd)
     }
 }
 
@@ -579,18 +588,77 @@ impl From<StdUnixStream> for UnixStream {
             inner,
             infd: VecDeque::with_capacity(Self::FD_QUEUE_SIZE),
             outfd: None,
-            cmsg_buffer: cmsg_space!([RawFd; Self::FD_QUEUE_SIZE]),
         }
     }
 }
 
-fn map_error(e: nix::Error) -> io::Error {
-    use nix::Error::*;
-
-    match e {
-        Sys(e) => io::Error::from_raw_os_error(e as i32),
-        _ => io::Error::new(io::ErrorKind::Other, Box::new(e)),
+impl Push<RawFd> for VecDeque<RawFd> {
+    fn push(&mut self, item: RawFd) -> Result<(), RawFd> {
+        self.push_back(item);
+        Ok(())
     }
+}
+
+// Safety precondition: cmsg must not be null and must be a valid cmsghdr (with its contents filled in).
+// In particular, cmsg must be valid as a buffer of cmsg.cmsg_len bytes in length.
+unsafe fn copy_fds(
+    cmsg: *const libc::cmsghdr,
+    fds_sink: &mut impl Push<RawFd>,
+) -> io::Result<usize> {
+    // Safety: follows from safety preconditions.
+    if (*cmsg).cmsg_level != libc::SOL_SOCKET || (*cmsg).cmsg_type != libc::SCM_RIGHTS {
+        return Ok(0);
+    }
+
+    assert!((*cmsg).cmsg_len < isize::MAX as usize);
+
+    let mut result = Ok(0);
+
+    // Safety: follows from the preconditions and the checks for cmsg_level
+    // and cmsg_type above. Note the p and p_end may not be properly aligned.
+    let (mut p, p_end) = cmsg_scm_rights_data_range(cmsg);
+    while p < p_end {
+        let fd = p.read_unaligned();
+
+        result = result
+            .and_then(|count| fds_sink.push(fd).map(|()| count + 1))
+            .or_else(|e| {
+                libc::close(fd);
+                Err(e)
+            });
+
+        // Safety: follows from the postcondition on cmsg_scm_rights_data_range()
+        // and the test that above the p < p_end.
+        p = p.offset(1);
+    }
+
+    result.map_err(|_| Error::new(ErrorKind::Other, PushFailureError::new()))
+}
+
+// Safety precondition: cmsg is non-null and is a valid cmsg with its contents
+// filled in and must have cmsg_level == SOL_SOCKET and csmg_type == SCM_RIGHTS.
+//
+// Postcondition: Returned valudes are pointers to the first RawFd in the data
+// portion and to one past the last RawFd. Both pointers may not be properly
+// aligned.
+unsafe fn cmsg_scm_rights_data_range(cmsg: *const libc::cmsghdr) -> (*const RawFd, *const RawFd) {
+    assert!((*cmsg).cmsg_len < isize::MAX as usize);
+
+    // Calculate the half open range for the data portion of the cmsg
+    // Safety: follows from the preconditions and the defintion of a cmsg.
+    let p_start: *const u8 = libc::CMSG_DATA(cmsg);
+    let p_end: *const u8 = cmsg.cast::<u8>().offset((*cmsg).cmsg_len as isize);
+
+    // Calculate the number of RawFd in the data portion of the cmsg. This rounds
+    // down and ignores any bytes at the end of the data portion that are not
+    // big enough to hold an entire RawFd.
+    let data_size = (p_end as usize) - (p_start as usize);
+    let count = data_size / mem::size_of::<RawFd>();
+
+    // Safety: the data portion of an SCM_RIGHTS cmsg is a array of RawFd.
+    let p = p_start.cast::<RawFd>();
+
+    (p, p.offset(count as isize))
 }
 
 // === impl UnixListener ===
@@ -845,15 +913,33 @@ impl fmt::Display for CMsgTruncatedError {
 
 impl std::error::Error for CMsgTruncatedError {}
 
+// === impl PushFailureError ===
+impl PushFailureError {
+    fn new() -> PushFailureError {
+        PushFailureError {}
+    }
+}
+
+impl fmt::Display for PushFailureError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "The sink for receiving file descriptors was unexpectedly full."
+        )
+    }
+}
+
+impl std::error::Error for PushFailureError {}
+
 // === precomputed constants generated by build.rs ===
 mod constants {
     include!(concat!(env!("OUT_DIR"), "/constants.rs"));
 }
 
 // === utility functions ===
-fn call_res<F, R>(f: F) -> Result<R, io::Error>
+fn call_res<F, R>(mut f: F) -> Result<R, io::Error>
 where
-    F: Fn() -> R,
+    F: FnMut() -> R,
     R: One + Neg<Output = R> + PartialEq,
 {
     let res = f();
