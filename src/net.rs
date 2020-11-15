@@ -22,14 +22,16 @@ use std::{
 };
 
 // needed until the MSRV is 1.43 when the associated constant becomes available
-use std::isize;
 use std::usize;
 
+use iomsg::MsgHdr;
 use num_traits::One;
 
 use tracing::{trace, warn};
 
 use crate::{DequeueFd, EnqueueFd, QueueFullError};
+
+mod iomsg;
 
 /// A structure representing a connected Unix socket with support for passing
 /// [`RawFd`][RawFd].
@@ -395,76 +397,61 @@ impl UnixStream {
 }
 
 fn recv_fds(
-    fd: RawFd,
+    sockfd: RawFd,
     bufs: &mut [IoSliceMut],
     fds_sink: &mut impl Push<RawFd>,
 ) -> io::Result<usize> {
-    // Safety: CMSG_SPACE is safe
-    debug_assert_eq!(constants::CMSG_SCM_RIGHTS_SPACE, unsafe {
-        libc::CMSG_SPACE((constants::MAX_FD_COUNT * mem::size_of::<RawFd>()) as _)
-    });
+   debug_assert_eq!(constants::CMSG_SCM_RIGHTS_SPACE as usize, MsgHdr::cmsg_buffer_fds_space(constants::MAX_FD_COUNT));
 
     // Size the buffer to be big enough to hold MAX_FD_COUNT RawFd's.
     // The assertion above ensure that this is the case.
     let mut cmsg_buffer = [0u8; constants::CMSG_SCM_RIGHTS_SPACE as _];
 
-    // Initialize the msghdr
-    let mut mhdr = unsafe {
-        // msghdr may have private members for padding. This ensures that they are zeroed.
-        let mut mhdr = mem::MaybeUninit::<libc::msghdr>::zeroed();
-        // Safety: we don't turn p into a reference or read from it
-        let p = mhdr.as_mut_ptr();
-        (*p).msg_name = ptr::null_mut();
-        (*p).msg_namelen = 0;
-        // This relies on IoSliceMut's guarentee that it is ABI compatible with iovec.
-        (*p).msg_iov = bufs.as_mut_ptr() as _;
-        (*p).msg_iovlen = bufs.len();
-        (*p).msg_control = cmsg_buffer.as_mut_ptr() as _;
-        (*p).msg_controllen = constants::CMSG_SCM_RIGHTS_SPACE as _;
-        (*p).msg_flags = 0;
-        // Safety: we have initalized all 7 fields of mhdr and zeroed the padding
-        mhdr.assume_init()
-    };
+    let recv = MsgHdr::from_io_slice_mut(bufs, &mut cmsg_buffer)
+        .recv(sockfd)?;
 
-    // Safety: we have properly initalized mhdr including its 3 internal pointers
-    // each with a correct msg_*len value describing the pointed to buffer's lenght.
-    let ret = call_res(|| unsafe { libc::recvmsg(fd, &mut mhdr, 0) }).map(|r| r as usize)?;
-
-    let mut fds_count = 0;
-
-    // Safety: mhdr was properly initalized and then passed to recvmsg.
-    let mut cmsg = unsafe { libc::CMSG_FIRSTHDR(&mhdr) };
-    while cmsg != ptr::null_mut() {
-        // Safety: cmsg is check to be non-null; it points to a valid cmsg
-        // because it is from a call to either CMSG_FIRSTHDR or CMSG_NXTHDR.
-
-        // TODO: deal with closing any remaining fd's in cmsg's after the one with
-        // the first error.
-        fds_count += unsafe { copy_fds(cmsg, fds_sink) }?;
-
-        // Safety: mhdr was properly initalized and passed to recvmsg; cmsg
-        // was set to a correct call to either CMSG_FIRSTHDR or CMSG_NXTHDR.
-        cmsg = unsafe { libc::CMSG_NXTHDR(&mhdr, cmsg) };
+    let mut result = Ok(0);
+    for fd in recv.fds_iter() {
+        result = result
+            .and_then(|count| fds_sink.push(fd).map(|()| count + 1))
+            .or_else(|e| {
+                // Safety: the RawFd from fds_iter() were just passed
+                // to this process by recv() so are live file descriptors
+                // that are not in use by any other part of the process.
+                unsafe { libc::close(fd) };
+                Err(e)
+            });
     }
 
-    if (mhdr.msg_flags & libc::MSG_CTRUNC) != 0 {
+    result.or_else(|_| {
         warn!(
             source = "UnixStream",
             event = "read",
-            condition = "cmsgs truncated"
+            condition = "too many fds received"
         );
 
-        Err(Error::new(ErrorKind::Other, CMsgTruncatedError::new()))
-    } else {
-        trace!(
-            source = "UnixStream",
-            event = "read",
-            fds_count,
-            byte_count = ret
-        );
+        Err(Error::new(ErrorKind::Other, PushFailureError::new()))
+    })
+    .and_then(|fds_count| {
+        if recv.was_control_truncated() {
+            warn!(
+                source = "UnixStream",
+                event = "read",
+                condition = "cmsgs truncated"
+            );
 
-        Ok(ret)
-    }
+            Err(Error::new(ErrorKind::Other, CMsgTruncatedError::new()))
+        } else {
+            trace!(
+                source = "UnixStream",
+                event = "read",
+                fds_count,
+                byte_count = recv.bytes_recvieved(),
+            );
+
+            Ok(recv.bytes_recvieved())
+        }
+    })
 }
 
 /// Enqueue a [`RawFd`][RawFd] for later transmission across the `UnixStream`.
@@ -597,68 +584,6 @@ impl Push<RawFd> for VecDeque<RawFd> {
         self.push_back(item);
         Ok(())
     }
-}
-
-// Safety precondition: cmsg must not be null and must be a valid cmsghdr (with its contents filled in).
-// In particular, cmsg must be valid as a buffer of cmsg.cmsg_len bytes in length.
-unsafe fn copy_fds(
-    cmsg: *const libc::cmsghdr,
-    fds_sink: &mut impl Push<RawFd>,
-) -> io::Result<usize> {
-    // Safety: follows from safety preconditions.
-    if (*cmsg).cmsg_level != libc::SOL_SOCKET || (*cmsg).cmsg_type != libc::SCM_RIGHTS {
-        return Ok(0);
-    }
-
-    assert!((*cmsg).cmsg_len < isize::MAX as usize);
-
-    let mut result = Ok(0);
-
-    // Safety: follows from the preconditions and the checks for cmsg_level
-    // and cmsg_type above. Note the p and p_end may not be properly aligned.
-    let (mut p, p_end) = cmsg_scm_rights_data_range(cmsg);
-    while p < p_end {
-        let fd = p.read_unaligned();
-
-        result = result
-            .and_then(|count| fds_sink.push(fd).map(|()| count + 1))
-            .or_else(|e| {
-                libc::close(fd);
-                Err(e)
-            });
-
-        // Safety: follows from the postcondition on cmsg_scm_rights_data_range()
-        // and the test that above the p < p_end.
-        p = p.offset(1);
-    }
-
-    result.map_err(|_| Error::new(ErrorKind::Other, PushFailureError::new()))
-}
-
-// Safety precondition: cmsg is non-null and is a valid cmsg with its contents
-// filled in and must have cmsg_level == SOL_SOCKET and csmg_type == SCM_RIGHTS.
-//
-// Postcondition: Returned valudes are pointers to the first RawFd in the data
-// portion and to one past the last RawFd. Both pointers may not be properly
-// aligned.
-unsafe fn cmsg_scm_rights_data_range(cmsg: *const libc::cmsghdr) -> (*const RawFd, *const RawFd) {
-    assert!((*cmsg).cmsg_len < isize::MAX as usize);
-
-    // Calculate the half open range for the data portion of the cmsg
-    // Safety: follows from the preconditions and the defintion of a cmsg.
-    let p_start: *const u8 = libc::CMSG_DATA(cmsg);
-    let p_end: *const u8 = cmsg.cast::<u8>().offset((*cmsg).cmsg_len as isize);
-
-    // Calculate the number of RawFd in the data portion of the cmsg. This rounds
-    // down and ignores any bytes at the end of the data portion that are not
-    // big enough to hold an entire RawFd.
-    let data_size = (p_end as usize) - (p_start as usize);
-    let count = data_size / mem::size_of::<RawFd>();
-
-    // Safety: the data portion of an SCM_RIGHTS cmsg is a array of RawFd.
-    let p = p_start.cast::<RawFd>();
-
-    (p, p.offset(count as isize))
 }
 
 // === impl UnixListener ===
