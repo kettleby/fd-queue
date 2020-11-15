@@ -19,8 +19,8 @@ use std::{
 };
 
 use libc::{
-    cmsghdr, iovec, msghdr, recvmsg, CMSG_DATA, CMSG_FIRSTHDR, CMSG_NXTHDR, CMSG_SPACE, MSG_CTRUNC,
-    SCM_RIGHTS, SOL_SOCKET,
+    cmsghdr, iovec, msghdr, recvmsg, CMSG_DATA, CMSG_FIRSTHDR, CMSG_NXTHDR,
+    CMSG_SPACE, MSG_CTRUNC, SCM_RIGHTS, SOL_SOCKET,
 };
 use num_traits::One;
 
@@ -35,7 +35,7 @@ pub struct MsgHdr<'a, State> {
     _phantom: PhantomData<&'a ()>,
 }
 
-// The type states fro MsgHdr.
+// The type states for MsgHdr.
 #[derive(Debug, Default)]
 pub struct RecvStart {}
 
