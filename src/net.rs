@@ -401,14 +401,16 @@ fn recv_fds(
     bufs: &mut [IoSliceMut],
     fds_sink: &mut impl Push<RawFd>,
 ) -> io::Result<usize> {
-   debug_assert_eq!(constants::CMSG_SCM_RIGHTS_SPACE as usize, MsgHdr::cmsg_buffer_fds_space(constants::MAX_FD_COUNT));
+    debug_assert_eq!(
+        constants::CMSG_SCM_RIGHTS_SPACE as usize,
+        MsgHdr::cmsg_buffer_fds_space(constants::MAX_FD_COUNT)
+    );
 
     // Size the buffer to be big enough to hold MAX_FD_COUNT RawFd's.
     // The assertion above ensure that this is the case.
     let mut cmsg_buffer = [0u8; constants::CMSG_SCM_RIGHTS_SPACE as _];
 
-    let recv = MsgHdr::from_io_slice_mut(bufs, &mut cmsg_buffer)
-        .recv(sockfd)?;
+    let recv = MsgHdr::from_io_slice_mut(bufs, &mut cmsg_buffer).recv(sockfd)?;
 
     let mut result = Ok(0);
     for fd in recv.fds_iter() {
@@ -423,35 +425,36 @@ fn recv_fds(
             });
     }
 
-    result.or_else(|_| {
-        warn!(
-            source = "UnixStream",
-            event = "read",
-            condition = "too many fds received"
-        );
-
-        Err(Error::new(ErrorKind::Other, PushFailureError::new()))
-    })
-    .and_then(|fds_count| {
-        if recv.was_control_truncated() {
+    result
+        .or_else(|_| {
             warn!(
                 source = "UnixStream",
                 event = "read",
-                condition = "cmsgs truncated"
+                condition = "too many fds received"
             );
 
-            Err(Error::new(ErrorKind::Other, CMsgTruncatedError::new()))
-        } else {
-            trace!(
-                source = "UnixStream",
-                event = "read",
-                fds_count,
-                byte_count = recv.bytes_recvieved(),
-            );
+            Err(Error::new(ErrorKind::Other, PushFailureError::new()))
+        })
+        .and_then(|fds_count| {
+            if recv.was_control_truncated() {
+                warn!(
+                    source = "UnixStream",
+                    event = "read",
+                    condition = "cmsgs truncated"
+                );
 
-            Ok(recv.bytes_recvieved())
-        }
-    })
+                Err(Error::new(ErrorKind::Other, CMsgTruncatedError::new()))
+            } else {
+                trace!(
+                    source = "UnixStream",
+                    event = "read",
+                    fds_count,
+                    byte_count = recv.bytes_recvieved(),
+                );
+
+                Ok(recv.bytes_recvieved())
+            }
+        })
 }
 
 /// Enqueue a [`RawFd`][RawFd] for later transmission across the `UnixStream`.

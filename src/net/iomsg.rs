@@ -9,16 +9,20 @@
 //! Types to provide a safe interface around libc::recvmsg and libc::sendmsg.
 
 use std::{
+    io,
     io::{IoSlice, IoSliceMut},
     marker::PhantomData,
     mem,
+    ops::Neg,
     os::unix::io::RawFd,
     ptr,
-io, ops::Neg};
+};
 
+use libc::{
+    cmsghdr, iovec, msghdr, recvmsg, CMSG_DATA, CMSG_FIRSTHDR, CMSG_NXTHDR, CMSG_SPACE, MSG_CTRUNC,
+    SCM_RIGHTS, SOL_SOCKET,
+};
 use num_traits::One;
-use libc::{msghdr, iovec, recvmsg, cmsghdr, CMSG_DATA, CMSG_FIRSTHDR,
-    CMSG_NXTHDR, CMSG_SPACE, SOL_SOCKET, SCM_RIGHTS, MSG_CTRUNC};
 
 #[derive(Debug)]
 pub struct MsgHdr<'a, State> {
@@ -65,7 +69,7 @@ struct FdsIterData {
     end: *const RawFd,
 }
 
-impl<'a, State: Default> MsgHdr<'a, State>{
+impl<'a, State: Default> MsgHdr<'a, State> {
     // Safety: iov must be valid for length iov_len and the array that iov points to
     // must outlive the returned MsgHdr.
     unsafe fn new(iov: *mut iovec, iov_len: usize, cmsg_buffer: &'a mut [u8]) -> Self {
@@ -119,8 +123,8 @@ impl<'a> MsgHdr<'a, RecvStart> {
     pub fn recv(mut self, sockfd: RawFd) -> io::Result<MsgHdr<'a, RecvEnd>> {
         // Safety: the invariant on self.mhdr mean that it has been properly
         // initalized for passing to recvmsg.
-        let count = call_res( || unsafe { recvmsg(sockfd, &mut self.mhdr, 0) })
-            .map(|c| c as usize)?;
+        let count =
+            call_res(|| unsafe { recvmsg(sockfd, &mut self.mhdr, 0) }).map(|c| c as usize)?;
 
         // Invariant: self.mhdr satified the invariant at the start of this call.
         // recvmsg can write into the buffers pointed to by the iovec's found
@@ -148,7 +152,7 @@ impl<'a> MsgHdr<'a, RecvEnd> {
         self.mhdr.msg_flags & MSG_CTRUNC != 0
     }
 
-    pub fn fds_iter(&'a self) -> impl Iterator<Item=RawFd> + 'a {
+    pub fn fds_iter(&'a self) -> impl Iterator<Item = RawFd> + 'a {
         // Safety: the invariant on self.mhdr means it is initalized
         // appropriately. The trasition from RecvStart state to RecvEnd
         // state means that recvmsg was called. The appropriate lifetimes
@@ -231,7 +235,7 @@ impl<'a> FdsIter<'a> {
 
             // Safety: follows from the invariant on msghdr and especially
             // the requirement to have called recvmsg.
-            let new_data = new_cmsg.and_then(|cmsg| unsafe {FdsIterData::new(cmsg) });
+            let new_data = new_cmsg.and_then(|cmsg| unsafe { FdsIterData::new(cmsg) });
 
             // Invariant: new_cmsg is produced by a call to CMSG_NXTHDR.
             self.cmsg = new_cmsg;
@@ -286,7 +290,6 @@ impl FdsIterData {
             // one byte past the end; the assertion above guarentees that the offset
             // in bytes implied by fds_count <= isize::MAX.
             let end = curr.offset(fds_count as isize);
-
 
             // Invariants:
             //      1. curr is non-null by defintion of CMSG_DATA; end is
