@@ -12,20 +12,18 @@ use std::{
     io::{self, prelude::*, Error, ErrorKind, IoSlice, IoSliceMut},
     iter, mem,
     net::Shutdown,
-    ops::Neg,
     os::unix::{
         io::{AsRawFd, FromRawFd, IntoRawFd, RawFd},
         net::{SocketAddr, UnixListener as StdUnixListner, UnixStream as StdUnixStream},
     },
     path::Path,
-    ptr,
 };
 
 // needed until the MSRV is 1.43 when the associated constant becomes available
 use std::usize;
 
-use iomsg::MsgHdr;
-use num_traits::One;
+use iomsg::{MsgHdr, cmsg_buffer_fds_space};
+
 
 use tracing::{trace, warn};
 
@@ -332,67 +330,18 @@ impl UnixStream {
         // bytes.
         let mut cmsg_buffer = [0u8; constants::CMSG_SCM_RIGHTS_SPACE as _];
 
-        // Initialize the msghdr
-        let mut mhdr = unsafe {
-            // msghdr may have private members for padding. This ensures that they are zeroed.
-            let mut mhdr = mem::MaybeUninit::<libc::msghdr>::zeroed();
-            // Safety: we don't turn p into a reference or read from it
-            let p = mhdr.as_mut_ptr();
-            (*p).msg_name = ptr::null_mut();
-            (*p).msg_namelen = 0;
-            // Trasmute bufs into a mutable pointer. sendmsg doesn't really mutate
-            // the buffer but the standard says that it takes a mutable pointer.
-            // This also relies on the guarentee given by IoSlice that it is ABI
-            // compatible with iovec.
-            (*p).msg_iov = bufs.as_ptr() as *mut _;
-            (*p).msg_iovlen = bufs.len();
-            (*p).msg_control = cmsg_buffer.as_mut_ptr() as _;
-            (*p).msg_controllen = constants::CMSG_SCM_RIGHTS_SPACE as _;
-            (*p).msg_flags = 0;
-            // Safety: we have initalized all 7 fields of mhdr and zeroed the padding
-            mhdr.assume_init()
-        };
+        let counts = MsgHdr::from_io_slice(bufs, &mut cmsg_buffer)
+            .encode_fds(fds)?
+            .send(self.as_raw_fd())?;
 
-        // Encode the cmsg_buffer
-        let count = unsafe {
-            // Safety: mhdr has been propery initialized.
-            let pmhdr: *mut libc::cmsghdr = libc::CMSG_FIRSTHDR(&mhdr as *const libc::msghdr);
-            assert_ne!(pmhdr, ptr::null_mut());
+        trace!(
+            source = "UnixStream",
+            event = "write",
+            fds_count = counts.fds_sent(),
+            byte_count = counts.bytes_sent(),
+        );
 
-            // note that p_fd may not be properly aligned so should not be dereference directly
-            let mut p_fd = libc::CMSG_DATA(pmhdr) as *mut RawFd;
-            let mut count = 0;
-            for fd in fds.take(Self::FD_QUEUE_SIZE) {
-                // Safety: p_fd points within cmsg_buffer since pmhdr points to
-                // the first cmmsghdr in msghdr which was initialized to cmsg_buffer.
-                // cmsg_buffer is set to be large enough to hold MAX_FD_COUNT RawFd's
-                // and we are looping over the first FD_QUEUE_SIZE fds. At the top
-                // we assert that FD_QUEUE_SIZE <= MAX_FD_COUNT.
-                p_fd.write_unaligned(fd);
-                p_fd = p_fd.offset(1);
-                count += 1;
-            }
-
-            // Safety: pmhdr points within cmsg_buffer (see above).
-            (*pmhdr).cmsg_len = libc::CMSG_LEN((count * mem::size_of::<RawFd>()) as u32) as usize;
-            (*pmhdr).cmsg_level = libc::SOL_SOCKET;
-            (*pmhdr).cmsg_type = libc::SCM_RIGHTS;
-
-            count
-        };
-
-        // Adjust msg_control and msg_controllen now that we know the count
-        if count == 0 {
-            mhdr.msg_control = ptr::null_mut();
-            mhdr.msg_controllen = 0;
-        } else {
-            // Safety: CMSG_SPACE is safe
-            mhdr.msg_controllen =
-                unsafe { libc::CMSG_SPACE((count * mem::size_of::<RawFd>()) as u32) as usize };
-        }
-
-        // Safety: mhdr has been properly prepared above.
-        call_res(|| unsafe { libc::sendmsg(self.as_raw_fd(), &mhdr, 0) }).map(|r| r as usize)
+        Ok(counts.bytes_sent())
     }
 }
 
@@ -403,7 +352,7 @@ fn recv_fds(
 ) -> io::Result<usize> {
     debug_assert_eq!(
         constants::CMSG_SCM_RIGHTS_SPACE as usize,
-        MsgHdr::cmsg_buffer_fds_space(constants::MAX_FD_COUNT)
+        cmsg_buffer_fds_space(constants::MAX_FD_COUNT)
     );
 
     // Size the buffer to be big enough to hold MAX_FD_COUNT RawFd's.
@@ -533,15 +482,6 @@ impl Write for UnixStream {
 
     fn write_vectored(&mut self, bufs: &[IoSlice]) -> io::Result<usize> {
         let outfd = self.outfd.take();
-
-        let byte_count: usize = bufs.iter().map(|iov| iov.len()).sum();
-        let fds_count = outfd.as_ref().map_or(0, |fds| fds.len());
-        trace!(
-            source = "UnixStream",
-            event = "write",
-            fds_count,
-            byte_count
-        );
 
         match outfd {
             Some(mut fds) => self.send_fds(bufs, fds.drain(..)),
@@ -862,20 +802,6 @@ impl std::error::Error for PushFailureError {}
 // === precomputed constants generated by build.rs ===
 mod constants {
     include!(concat!(env!("OUT_DIR"), "/constants.rs"));
-}
-
-// === utility functions ===
-fn call_res<F, R>(mut f: F) -> Result<R, io::Error>
-where
-    F: FnMut() -> R,
-    R: One + Neg<Output = R> + PartialEq,
-{
-    let res = f();
-    if res == -R::one() {
-        Err(io::Error::last_os_error())
-    } else {
-        Ok(res)
-    }
 }
 
 #[cfg(test)]

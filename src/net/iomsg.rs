@@ -9,19 +9,19 @@
 //! Types to provide a safe interface around libc::recvmsg and libc::sendmsg.
 
 use std::{
-    io,
-    io::{IoSlice, IoSliceMut},
+    convert::TryInto,
+    io::{self, IoSlice, IoSliceMut},
     marker::PhantomData,
     mem,
     ops::Neg,
     os::unix::io::RawFd,
     ptr,
-};
+fmt, error};
 
 use libc::{
     cmsghdr, iovec, msghdr, recvmsg, CMSG_DATA, CMSG_FIRSTHDR, CMSG_NXTHDR,
-    CMSG_SPACE, MSG_CTRUNC, SCM_RIGHTS, SOL_SOCKET,
-};
+    CMSG_SPACE, CMSG_LEN, MSG_CTRUNC, SCM_RIGHTS, SOL_SOCKET,
+sendmsg};
 use num_traits::One;
 
 #[derive(Debug)]
@@ -29,11 +29,15 @@ pub struct MsgHdr<'a, State> {
     // Invariant: mhdr is properly initalized with msg_name null, and with
     // msg_iov and msg_control valid pointers for length msg_iovlen and
     // msg_controllen respectively. The arrays that msg_iov and msg_control
-    // point to must outlive mhdr.
+    // point to must outlive mhdr. The pointer for msg_control may instead
+    // be null (with a 0 msg_controllen) for a State that is a NullableControl
+    // state.
     mhdr: msghdr,
     state: State,
     _phantom: PhantomData<&'a ()>,
 }
+
+trait NullableControl {}
 
 // The type states for MsgHdr.
 #[derive(Debug, Default)]
@@ -46,6 +50,21 @@ pub struct RecvEnd {
 
 #[derive(Debug, Default)]
 pub struct SendStart {}
+
+#[derive(Debug)]
+pub struct SendReady {
+    fds_count: usize,
+}
+
+impl NullableControl for SendReady {}
+
+#[derive(Debug)]
+pub struct SendEnd {
+    bytes_sent: usize,
+    fds_sent: usize,
+}
+
+impl NullableControl for SendEnd {}
 
 struct FdsIter<'a> {
     // Invariant: mhdr is initalized as described in MsgHdr.that has
@@ -101,14 +120,6 @@ impl<'a, State: Default> MsgHdr<'a, State> {
 }
 
 impl<'a> MsgHdr<'a, RecvStart> {
-    /// Returns the size needed for a msghdr control buffer big
-    /// enough to hold `count` `RawFd`'s.
-    #[allow(dead_code)]
-    pub fn cmsg_buffer_fds_space(count: usize) -> usize {
-        // Safety: CMSG_SPACE is safe
-        unsafe { CMSG_SPACE((count * mem::size_of::<RawFd>()) as u32) as usize }
-    }
-
     pub fn from_io_slice_mut(bufs: &'a mut [IoSliceMut], cmsg_buffer: &'a mut [u8]) -> Self {
         // IoSliceMut guarentees ABI compatibility with iovec.
         let iov: *mut iovec = bufs.as_mut_ptr() as *mut iovec;
@@ -121,7 +132,7 @@ impl<'a> MsgHdr<'a, RecvStart> {
     }
 
     pub fn recv(mut self, sockfd: RawFd) -> io::Result<MsgHdr<'a, RecvEnd>> {
-        // Safety: the invariant on self.mhdr mean that it has been properly
+        // Safety: the invariants on self.mhdr mean that it has been properly
         // initalized for passing to recvmsg.
         let count =
             call_res(|| unsafe { recvmsg(sockfd, &mut self.mhdr, 0) }).map(|c| c as usize)?;
@@ -164,8 +175,6 @@ impl<'a> MsgHdr<'a, RecvEnd> {
 }
 
 impl<'a> MsgHdr<'a, SendStart> {
-    // TODO: remove this when it is not longer necessary
-    #[allow(dead_code)]
     pub fn from_io_slice(bufs: &'a [IoSlice], cmsg_buffer: &'a mut [u8]) -> Self {
         // IoSlice guarentees ABI compatibility with iovec. sendmsg doesn't
         // mutate the iovec array but the standard says it takes a mutable
@@ -179,6 +188,117 @@ impl<'a> MsgHdr<'a, SendStart> {
         // slice (bufs). The array that iov points to will outlive the returned
         // MsgHdr because of the lifetime constraints on bufs and on MsgHdr.
         unsafe { Self::new(iov, iov_len, cmsg_buffer) }
+    }
+
+    pub fn encode_fds(mut self, fds: impl Iterator<Item = RawFd>) -> io::Result<MsgHdr<'a, SendReady>> {
+        // Safety: the invariant on self.mhdr makes this call safe.
+        let cmsg = unsafe { CMSG_FIRSTHDR(&self.mhdr) };
+
+        // Safety: cmsg was initalized by a call to CMSG_FIRSTHDR above.
+        let p = unsafe { CMSG_DATA(cmsg) };
+        // Safety: the invariant on self.mhdr and the defintion of the msg_control*
+        // fields of a msghdr make this pointer arithmatic calculate a byte
+        // point to one past the end of the msg_control buffer.
+        let p_max = unsafe { (self.mhdr.msg_control.cast::<u8>())
+            .offset(self.mhdr.msg_controllen.try_into().unwrap()) };
+        let data_size = (p_max as usize) - (p as usize);
+        assert!(data_size <= (isize::MAX as usize));
+        // this rounds down to the maximum number of file descriptors that can
+        // fit in the msg_control buffer.
+        let fds_count: usize = data_size / mem::size_of::<RawFd>();
+
+        let mut curr = p.cast::<RawFd>();
+        // Safety: curr is the start of the cmsg data buffer which is a part of
+        // the mhdr control buffer; the way fds_count is calculated above means
+        // that curr.offset() points either within the control buffer or to the
+        // first byte after the control buffer. The offset in bytes is at most
+        // data_size (by the way fds_count is calculated) which is asserted to
+        // be no more than isize::MAX.
+        let end = unsafe { curr.offset(fds_count.try_into().unwrap()) };
+
+        let mut count = 0;
+        for fd  in fds {
+            if curr >= end {
+                return Err(CMsgBufferTooSmallError::new());
+            }
+
+            // Safety: curr is initalized to the start of the cmsg data buffer and
+            // advanced within that buffer (through the offset() call below and the
+            // test against end above). It is thus a non-null pointer within a single
+            // object which is a subset of the msg_control buffer, and hence is
+            // dereferenceable. curr is therefore valid for write.
+            unsafe { curr.write_unaligned(fd) };
+
+            // Safety: curr is intitially the start of the cmsg data buffer and
+            // is tested above to be less than the end of the buffer (end is
+            // calculated to be an integral number of RawFd's from the start of
+            // the buffer). curr.offset() (and hence curr on the next time through
+            // the loop) is either still within the buffer or is at most one byte
+            // past the end. A single RawFd sized offset satifies the offset
+            // related requirements of the offset() method.
+            curr = unsafe { curr.offset(1) };
+            count += 1;
+        }
+
+        let size: u32 = (count * mem::size_of::<RawFd>()).try_into()
+            .expect("Attempt to send too many RawFd's at once: overflowed a u32.");
+        // Safety: cmsg was properly initalized by a call to CMSG_FIRSTHDR above.
+        unsafe {
+            (*cmsg).cmsg_len = CMSG_LEN(size).try_into().unwrap();
+            (*cmsg).cmsg_level = SOL_SOCKET;
+            (*cmsg).cmsg_type = SCM_RIGHTS;
+        }
+
+        // Adjust msg_control* now that we know the count of the fds
+        if count == 0 {
+            self.mhdr.msg_control = ptr::null_mut();
+            self.mhdr.msg_controllen = 0;
+        } else {
+            self.mhdr.msg_controllen = cmsg_buffer_fds_space(count);
+        }
+
+        // Invariant: self.mhdr satified the invariant at the start of the method.
+        // If count is non-zero then msg_controllen may be shortened but this
+        // still satifies the invariant (it is not lengthend because of the
+        // "curr >= end" guard in the loop). If count is 0 then msg_control
+        // is set to null (with a 0 msg_controllen) but this is allowed since
+        // the next State (SendReady) is a NullableControl state.
+        Ok(MsgHdr {
+            mhdr: self.mhdr,
+            state: SendReady { fds_count: count},
+            _phantom: PhantomData,
+        })
+    }
+}
+
+impl<'a> MsgHdr<'a, SendReady> {
+    pub fn send(self, sock_fd: RawFd) -> io::Result<MsgHdr<'a, SendEnd>> {
+        // Safety: the invariants on self.mhdr mean that it has been properly
+        // initalized for passing to sendmsg.
+        let bytes_sent = call_res(|| unsafe { sendmsg(sock_fd, &self.mhdr, 0) }).map(|c| c as usize)?;
+
+        // Invariant: self.mhdr satified the invariants at the start of this
+        // call and sendmsg does not change it. SendEnd (like SendReady) is
+        // a NullableControl state so that part of the invariant also carries
+        // through.
+        Ok(MsgHdr {
+            mhdr: self.mhdr,
+            state: SendEnd {
+                bytes_sent,
+                fds_sent: self.state.fds_count,
+            },
+            _phantom: PhantomData,
+        })
+    }
+}
+
+impl<'a> MsgHdr<'a, SendEnd> {
+    pub fn bytes_sent(&self) -> usize {
+        self.state.bytes_sent
+    }
+
+    pub fn fds_sent(&self) -> usize {
+        self.state.fds_sent
     }
 }
 
@@ -337,6 +457,34 @@ impl Iterator for FdsIterData {
         }
     }
 }
+
+#[derive(Debug)]
+struct CMsgBufferTooSmallError {}
+
+impl CMsgBufferTooSmallError {
+    fn new() -> io::Error {
+        io::Error::new(io::ErrorKind::Other, CMsgBufferTooSmallError {})
+    }
+}
+
+impl fmt::Display for CMsgBufferTooSmallError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "The control buffer passed to MsgHdr was too small for the \
+                    number of file descriptors")
+    }
+}
+
+impl error::Error for CMsgBufferTooSmallError {}
+
+
+/// Returns the size needed for a msghdr control buffer big
+/// enough to hold `count` `RawFd`'s.
+#[allow(dead_code)]
+pub fn cmsg_buffer_fds_space(count: usize) -> usize {
+    // Safety: CMSG_SPACE is safe
+    unsafe { CMSG_SPACE((count * mem::size_of::<RawFd>()) as u32) as usize }
+}
+
 
 fn call_res<F, R>(mut f: F) -> Result<R, io::Error>
 where
