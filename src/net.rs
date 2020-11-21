@@ -10,7 +10,7 @@ use std::{
     collections::VecDeque,
     fmt,
     io::{self, prelude::*, Error, ErrorKind, IoSlice, IoSliceMut},
-    iter, mem,
+    iter,
     net::Shutdown,
     os::unix::{
         io::{AsRawFd, FromRawFd, IntoRawFd, RawFd},
@@ -317,10 +317,10 @@ impl UnixStream {
     }
 
     fn send_fds(&self, bufs: &[IoSlice], fds: impl Iterator<Item = RawFd>) -> io::Result<usize> {
-        // Safety: CMSG_SPACE() is safe
-        debug_assert_eq!(constants::CMSG_SCM_RIGHTS_SPACE, unsafe {
-            libc::CMSG_SPACE((constants::MAX_FD_COUNT * mem::size_of::<RawFd>()) as _)
-        });
+        debug_assert_eq!(
+            constants::CMSG_SCM_RIGHTS_SPACE as usize,
+            cmsg_buffer_fds_space(constants::MAX_FD_COUNT)
+        );
         assert!(Self::FD_QUEUE_SIZE <= constants::MAX_FD_COUNT);
 
         // Size the buffer to be big enough to hold MAX_FD_COUNT RawFd's.
