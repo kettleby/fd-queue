@@ -10,18 +10,19 @@
 
 use std::{
     convert::TryInto,
+    error, fmt,
     io::{self, IoSlice, IoSliceMut},
     marker::PhantomData,
     mem,
     ops::Neg,
     os::unix::io::RawFd,
     ptr,
-fmt, error};
+};
 
 use libc::{
-    cmsghdr, iovec, msghdr, recvmsg, CMSG_DATA, CMSG_FIRSTHDR, CMSG_NXTHDR,
-    CMSG_SPACE, CMSG_LEN, MSG_CTRUNC, SCM_RIGHTS, SOL_SOCKET,
-sendmsg};
+    cmsghdr, iovec, msghdr, recvmsg, sendmsg, CMSG_DATA, CMSG_FIRSTHDR, CMSG_LEN, CMSG_NXTHDR,
+    CMSG_SPACE, MSG_CTRUNC, SCM_RIGHTS, SOL_SOCKET,
+};
 use num_traits::One;
 
 #[derive(Debug)]
@@ -190,7 +191,10 @@ impl<'a> MsgHdr<'a, SendStart> {
         unsafe { Self::new(iov, iov_len, cmsg_buffer) }
     }
 
-    pub fn encode_fds(mut self, fds: impl Iterator<Item = RawFd>) -> io::Result<MsgHdr<'a, SendReady>> {
+    pub fn encode_fds(
+        mut self,
+        fds: impl Iterator<Item = RawFd>,
+    ) -> io::Result<MsgHdr<'a, SendReady>> {
         // Safety: the invariant on self.mhdr makes this call safe.
         let cmsg = unsafe { CMSG_FIRSTHDR(&self.mhdr) };
 
@@ -199,8 +203,10 @@ impl<'a> MsgHdr<'a, SendStart> {
         // Safety: the invariant on self.mhdr and the defintion of the msg_control*
         // fields of a msghdr make this pointer arithmatic calculate a byte
         // point to one past the end of the msg_control buffer.
-        let p_max = unsafe { (self.mhdr.msg_control.cast::<u8>())
-            .offset(self.mhdr.msg_controllen.try_into().unwrap()) };
+        let p_max = unsafe {
+            (self.mhdr.msg_control.cast::<u8>())
+                .offset(self.mhdr.msg_controllen.try_into().unwrap())
+        };
         let data_size = (p_max as usize) - (p as usize);
         assert!(data_size <= (isize::MAX as usize));
         // this rounds down to the maximum number of file descriptors that can
@@ -217,7 +223,7 @@ impl<'a> MsgHdr<'a, SendStart> {
         let end = unsafe { curr.offset(fds_count.try_into().unwrap()) };
 
         let mut count = 0;
-        for fd  in fds {
+        for fd in fds {
             if curr >= end {
                 return Err(CMsgBufferTooSmallError::new());
             }
@@ -240,7 +246,8 @@ impl<'a> MsgHdr<'a, SendStart> {
             count += 1;
         }
 
-        let size: u32 = (count * mem::size_of::<RawFd>()).try_into()
+        let size: u32 = (count * mem::size_of::<RawFd>())
+            .try_into()
             .expect("Attempt to send too many RawFd's at once: overflowed a u32.");
         // Safety: cmsg was properly initalized by a call to CMSG_FIRSTHDR above.
         unsafe {
@@ -265,7 +272,7 @@ impl<'a> MsgHdr<'a, SendStart> {
         // the next State (SendReady) is a NullableControl state.
         Ok(MsgHdr {
             mhdr: self.mhdr,
-            state: SendReady { fds_count: count},
+            state: SendReady { fds_count: count },
             _phantom: PhantomData,
         })
     }
@@ -275,7 +282,8 @@ impl<'a> MsgHdr<'a, SendReady> {
     pub fn send(self, sock_fd: RawFd) -> io::Result<MsgHdr<'a, SendEnd>> {
         // Safety: the invariants on self.mhdr mean that it has been properly
         // initalized for passing to sendmsg.
-        let bytes_sent = call_res(|| unsafe { sendmsg(sock_fd, &self.mhdr, 0) }).map(|c| c as usize)?;
+        let bytes_sent =
+            call_res(|| unsafe { sendmsg(sock_fd, &self.mhdr, 0) }).map(|c| c as usize)?;
 
         // Invariant: self.mhdr satified the invariants at the start of this
         // call and sendmsg does not change it. SendEnd (like SendReady) is
@@ -469,13 +477,15 @@ impl CMsgBufferTooSmallError {
 
 impl fmt::Display for CMsgBufferTooSmallError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "The control buffer passed to MsgHdr was too small for the \
-                    number of file descriptors")
+        write!(
+            f,
+            "The control buffer passed to MsgHdr was too small for the \
+                    number of file descriptors"
+        )
     }
 }
 
 impl error::Error for CMsgBufferTooSmallError {}
-
 
 /// Returns the size needed for a msghdr control buffer big
 /// enough to hold `count` `RawFd`'s.
@@ -484,7 +494,6 @@ pub fn cmsg_buffer_fds_space(count: usize) -> usize {
     // Safety: CMSG_SPACE is safe
     unsafe { CMSG_SPACE((count * mem::size_of::<RawFd>()) as u32) as usize }
 }
-
 
 fn call_res<F, R>(mut f: F) -> Result<R, io::Error>
 where

@@ -22,8 +22,7 @@ use std::{
 // needed until the MSRV is 1.43 when the associated constant becomes available
 use std::usize;
 
-use iomsg::{MsgHdr, cmsg_buffer_fds_space};
-
+use iomsg::{cmsg_buffer_fds_space, MsgHdr};
 
 use tracing::{trace, warn};
 
