@@ -35,7 +35,7 @@ pub struct MsgHdr<'a, State> {
     // state.
     mhdr: msghdr,
     state: State,
-    _phantom: PhantomData<&'a ()>,
+    _phantom: PhantomData<(&'a mut [iovec], &'a mut [u8])>,
 }
 
 trait NullableControl {}
