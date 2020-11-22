@@ -22,7 +22,7 @@ use std::{
 use libc::{
     cmsghdr, iovec, msghdr, recvmsg, sendmsg, CMSG_DATA, CMSG_FIRSTHDR, CMSG_LEN, CMSG_NXTHDR,
     CMSG_SPACE, MSG_CTRUNC, SCM_RIGHTS, SOL_SOCKET,
-};
+close};
 use num_traits::One;
 
 #[derive(Debug)]
@@ -40,13 +40,59 @@ pub struct MsgHdr<'a, State> {
 
 trait NullableControl {}
 
-// The type states for MsgHdr.
+// The type states for MsgHdr are used to implement the following
+// finite state machine:
+//
+//    -> RecvStart -(recvmsg)-> RecvEnd
+//  /
+// O
+//  \
+//    -> SendStart -> SendReady -(sendmsg)-> SendEnd
+//
+// Most of the states are implemented through a specialization of MsgHdr. The
+// exception is for "RecvEnd" which is implemented as its own type MsgHdrRecvEnd.
+// This is done to allow it to have a Drop implementation.
+//
+// The diagram above shows which transitions involve a call to recvmsg or
+// sendmsg.
+//
+// The SendReady state logically holds a (possibility empty) slice of shared
+// references to file descriptors. It is actually implemented as an encoding of
+// RawFd's into a buffer. This module does not attempt to use the rust type
+// system to prevent a caller from closing a RawFd that is encoded into the
+// SendReady state, but this would almost certainly lead to incorrect results.
+//
+// The RecvEnd state logically owns a (possibility empty) slice of file
+// descriptors until the calling code takes them by iterating the Iterator
+// returned by take_fds(). If the RecvEnd state or the Iterator returned
+// by take_fds() is dropped before all of the owned file descriptors have
+// been taken then the remaining file descriptors are closed.
+
 #[derive(Debug, Default)]
 pub struct RecvStart {}
 
+// This is loggically a MsgHdr<'a, RecvEnd> but we need to implement
+// Drop for it and Drop impls can't be specialized (rustc error E0366).
+//
+// This type owns the file descriptors encoded into mhdr.msg_control until they
+// are taken (by a call to take_fds()) after which they are owned a single
+// FdsIter.
+//
+// This state occurs after a call to recvmsg() which means that the file
+// descriptors in msg_control are new to the current process. Until they
+// are taken (by iterating the return value of take_fds()) the only
+// part of the process that knows about them is MsgHdrRecvEnd and
+// FdsIter. The Drop implementations on those two types are
+// responsible for closing any file descriptors that haven't been
+// taken. Any file descriptors that have been taken are the caller's
+// responsibility.
 #[derive(Debug)]
-pub struct RecvEnd {
+pub struct MsgHdrRecvEnd<'a> {
+    // Invariant: the same as MsgHdr for a non-NullableControl State
+    mhdr: msghdr,
     bytes_recvieved: usize,
+    fds_taken: bool,
+    _phantom: PhantomData<(&'a mut [iovec], &'a mut [u8])>,
 }
 
 #[derive(Debug, Default)]
@@ -132,7 +178,7 @@ impl<'a> MsgHdr<'a, RecvStart> {
         unsafe { Self::new(iov, iov_len, cmsg_buffer) }
     }
 
-    pub fn recv(mut self, sockfd: RawFd) -> io::Result<MsgHdr<'a, RecvEnd>> {
+    pub fn recv(mut self, sockfd: RawFd) -> io::Result<MsgHdrRecvEnd<'a>> {
         // Safety: the invariants on self.mhdr mean that it has been properly
         // initalized for passing to recvmsg.
         let count =
@@ -145,33 +191,61 @@ impl<'a> MsgHdr<'a, RecvStart> {
         // buffer read, but this will be no longer than the msg_controllen passed
         // in so msg_control will still be a valid pointer for length
         // msg_controllen.
-        Ok(MsgHdr {
-            mhdr: self.mhdr,
-            state: RecvEnd {
+        Ok(MsgHdrRecvEnd {
+                mhdr: self.mhdr,
                 bytes_recvieved: count,
-            },
-            _phantom: PhantomData,
+                fds_taken: false,
+                _phantom: PhantomData,
         })
     }
 }
 
-impl<'a> MsgHdr<'a, RecvEnd> {
+impl<'a> MsgHdrRecvEnd<'a> {
     pub fn bytes_recvieved(&self) -> usize {
-        self.state.bytes_recvieved
+        self.bytes_recvieved
     }
 
     pub fn was_control_truncated(&self) -> bool {
         self.mhdr.msg_flags & MSG_CTRUNC != 0
     }
 
-    pub fn fds_iter(&'a self) -> impl Iterator<Item = RawFd> + 'a {
-        // Safety: the invariant on self.mhdr means it is initalized
-        // appropriately. The trasition from RecvStart state to RecvEnd
-        // state means that recvmsg was called. The appropriate lifetimes
-        // for the buffers in mhdr are guarenteed by holding a shared
-        // reference to self and by the absence of other methods that
-        // can modify a MsgHdr<RecvEnd>.
-        unsafe { FdsIter::new(&self.mhdr) }
+    pub fn take_fds<'b>(&'b mut self) -> impl Iterator<Item = RawFd> + 'b {
+        if self.fds_taken {
+            FdsIter::empty(&self.mhdr)
+        } else {
+            self.fds_taken = true;
+            // Safety: the invariant on self.mhdr means it is initalized
+            // appropriately. The trasition from RecvStart state to RecvEnd
+            // state means that recvmsg was called. The appropriate lifetimes
+            // for the buffers in mhdr are guarenteed by holding a shared
+            // reference to self and by the absence of other methods that
+            // can modify a MsgHdr<RecvEnd>.
+            unsafe { FdsIter::new(&self.mhdr) }
+        }
+    }
+}
+
+// Close the file descriptors in the MsgHdrRecvEnd unless they have been taken
+// by a call to take_fds(), in which case the returned FdsIter is responsible
+// for closing them.
+//
+// The Drop implementations on MsgHdrRecvEnd and FdsIter use a leak amplification
+// stategy to avoid calling libc::close() twice on the same file descriptor.
+// See the discussion in the Nomicon at
+// https://doc.rust-lang.org/nomicon/leaking.html#drain for a general description
+// of this issue.
+//
+// Specifally the following code will leak open file descriptors but will not
+// attempt to call libc::close() twice on the same file descriptor:
+//
+//      let mut r: MsgHdrRecvEnd = ...;
+//      mem::forget(r.take_fds());
+//      mem::drop(r);
+impl<'a> Drop for MsgHdrRecvEnd<'a> {
+    fn drop(&mut self) {
+        if !self.fds_taken {
+            drop(self.take_fds());
+        }
     }
 }
 
@@ -191,6 +265,8 @@ impl<'a> MsgHdr<'a, SendStart> {
         unsafe { Self::new(iov, iov_len, cmsg_buffer) }
     }
 
+    /// The caller is responsible for ensuring that all of the file descriptors
+    /// from the `fds` iterator remain open until after the call to `send()`.
     pub fn encode_fds(
         mut self,
         fds: impl Iterator<Item = RawFd>,
@@ -330,6 +406,14 @@ impl<'a> FdsIter<'a> {
         }
     }
 
+    fn empty(mhdr: &'a msghdr) -> Self {
+        FdsIter {
+            mhdr,
+            cmsg: None,
+            data: None,
+        }
+    }
+
     // Safety: mhdr is initalized as described in invariant for MsgHdr and
     // has been filled in by a call to recvmsg. The buffers pointed to
     // by fields of mhdr must not be changed during the lifetime of the
@@ -386,6 +470,23 @@ impl<'a> Iterator for FdsIter<'a> {
                     }
                 }
             };
+        }
+    }
+}
+
+// See the comment on Drop for MsgHdrRecvEnd for the general Drop strategy.
+// This Drop impl will close all remaining file descriptors that are
+// (logically) owned by this FdsIter. There can be at most one non-empty
+// FdsIter for a given MsgHdrRecvEnd. If it is dropped then any remaining
+// file descriptors that haven't been iterated never will and there will
+// be not other references to those file descriptors in the process so
+// we close them here to avoid leaking them.
+impl<'a> Drop for FdsIter<'a> {
+    fn drop(&mut self) {
+        for fd in self {
+            // Safety: This is the only reference to the file descriptor
+            // in the process so it is safe to close it.
+            unsafe { close(fd) };
         }
     }
 }

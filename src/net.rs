@@ -358,51 +358,43 @@ fn recv_fds(
     // The assertion above ensure that this is the case.
     let mut cmsg_buffer = [0u8; constants::CMSG_SCM_RIGHTS_SPACE as _];
 
-    let recv = MsgHdr::from_io_slice_mut(bufs, &mut cmsg_buffer).recv(sockfd)?;
+    let mut recv = MsgHdr::from_io_slice_mut(bufs, &mut cmsg_buffer).recv(sockfd)?;
 
-    let mut result = Ok(0);
-    for fd in recv.fds_iter() {
-        result = result
-            .and_then(|count| fds_sink.push(fd).map(|()| count + 1))
-            .or_else(|e| {
-                // Safety: the RawFd from fds_iter() were just passed
-                // to this process by recv() so are live file descriptors
-                // that are not in use by any other part of the process.
-                unsafe { libc::close(fd) };
-                Err(e)
-            });
-    }
-
-    result
-        .or_else(|_| {
-            warn!(
-                source = "UnixStream",
-                event = "read",
-                condition = "too many fds received"
-            );
-
-            Err(Error::new(ErrorKind::Other, PushFailureError::new()))
-        })
-        .and_then(|fds_count| {
-            if recv.was_control_truncated() {
+    let mut fds_count = 0;
+    for fd in recv.take_fds() {
+        match fds_sink.push(fd) {
+            Ok(_) => fds_count += 1,
+            Err(_) => {
+                // TODO: deal with the leak of fd at this point
                 warn!(
                     source = "UnixStream",
                     event = "read",
-                    condition = "cmsgs truncated"
+                    condition = "too many fds received"
                 );
 
-                Err(Error::new(ErrorKind::Other, CMsgTruncatedError::new()))
-            } else {
-                trace!(
-                    source = "UnixStream",
-                    event = "read",
-                    fds_count,
-                    byte_count = recv.bytes_recvieved(),
-                );
-
-                Ok(recv.bytes_recvieved())
+                return Err(PushFailureError::new());
             }
-        })
+        }
+   }
+
+   if recv.was_control_truncated() {
+        warn!(
+            source = "UnixStream",
+            event = "read",
+            condition = "cmsgs truncated"
+        );
+
+        Err(Error::new(ErrorKind::Other, CMsgTruncatedError::new()))
+    } else {
+        trace!(
+            source = "UnixStream",
+            event = "read",
+            fds_count,
+            byte_count = recv.bytes_recvieved(),
+        );
+
+        Ok(recv.bytes_recvieved())
+    }
 }
 
 /// Enqueue a [`RawFd`][RawFd] for later transmission across the `UnixStream`.
@@ -782,8 +774,8 @@ impl std::error::Error for CMsgTruncatedError {}
 
 // === impl PushFailureError ===
 impl PushFailureError {
-    fn new() -> PushFailureError {
-        PushFailureError {}
+    fn new() -> Error {
+        Error::new(ErrorKind::Other, PushFailureError {})
     }
 }
 
