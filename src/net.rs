@@ -383,7 +383,7 @@ fn recv_fds(
             condition = "cmsgs truncated"
         );
 
-        Err(Error::new(ErrorKind::Other, CMsgTruncatedError::new()))
+        Err(CMsgTruncatedError::new())
     } else {
         trace!(
             source = "UnixStream",
@@ -755,8 +755,8 @@ impl Iterator for Incoming<'_> {
 
 // === impl CMsgTruncatedError ===
 impl CMsgTruncatedError {
-    fn new() -> CMsgTruncatedError {
-        CMsgTruncatedError {}
+    fn new() -> Error {
+        Error::new(ErrorKind::Other, CMsgTruncatedError {})
     }
 }
 
