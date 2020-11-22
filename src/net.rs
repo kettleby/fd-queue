@@ -315,33 +315,33 @@ impl UnixStream {
     pub(crate) fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
         self.inner.set_nonblocking(nonblocking)
     }
+}
 
-    fn send_fds(&self, bufs: &[IoSlice], fds: impl Iterator<Item = RawFd>) -> io::Result<usize> {
-        debug_assert_eq!(
-            constants::CMSG_SCM_RIGHTS_SPACE as usize,
-            cmsg_buffer_fds_space(constants::MAX_FD_COUNT)
-        );
-        assert!(Self::FD_QUEUE_SIZE <= constants::MAX_FD_COUNT);
+fn send_fds(sockfd: RawFd, bufs: &[IoSlice], fds: impl Iterator<Item = RawFd>) -> io::Result<usize> {
+    debug_assert_eq!(
+        constants::CMSG_SCM_RIGHTS_SPACE as usize,
+        cmsg_buffer_fds_space(constants::MAX_FD_COUNT)
+    );
+    assert!(UnixStream::FD_QUEUE_SIZE <= constants::MAX_FD_COUNT);
 
-        // Size the buffer to be big enough to hold MAX_FD_COUNT RawFd's.
-        // The assertions above ensure that this is the case. The buffer
-        // must be zeroed because subsequent code will not clear padding
-        // bytes.
-        let mut cmsg_buffer = [0u8; constants::CMSG_SCM_RIGHTS_SPACE as _];
+    // Size the buffer to be big enough to hold MAX_FD_COUNT RawFd's.
+    // The assertions above ensure that this is the case. The buffer
+    // must be zeroed because subsequent code will not clear padding
+    // bytes.
+    let mut cmsg_buffer = [0u8; constants::CMSG_SCM_RIGHTS_SPACE as _];
 
-        let counts = MsgHdr::from_io_slice(bufs, &mut cmsg_buffer)
-            .encode_fds(fds)?
-            .send(self.as_raw_fd())?;
+    let counts = MsgHdr::from_io_slice(bufs, &mut cmsg_buffer)
+        .encode_fds(fds)?
+        .send(sockfd)?;
 
-        trace!(
-            source = "UnixStream",
-            event = "write",
-            fds_count = counts.fds_sent(),
-            byte_count = counts.bytes_sent(),
-        );
+    trace!(
+        source = "UnixStream",
+        event = "write",
+        fds_count = counts.fds_sent(),
+        byte_count = counts.bytes_sent(),
+    );
 
-        Ok(counts.bytes_sent())
-    }
+    Ok(counts.bytes_sent())
 }
 
 fn recv_fds(
@@ -474,8 +474,8 @@ impl Write for UnixStream {
         let outfd = self.outfd.take();
 
         match outfd {
-            Some(mut fds) => self.send_fds(bufs, fds.drain(..)),
-            None => self.send_fds(bufs, iter::empty()),
+            Some(mut fds) => send_fds(self.as_raw_fd(), bufs, fds.drain(..)),
+            None => send_fds(self.as_raw_fd(), bufs, iter::empty()),
         }
     }
 
