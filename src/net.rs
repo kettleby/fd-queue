@@ -22,7 +22,7 @@ use std::{
 // needed until the MSRV is 1.43 when the associated constant becomes available
 use std::usize;
 
-use iomsg::{cmsg_buffer_fds_space, MsgHdr, Fd};
+use iomsg::{cmsg_buffer_fds_space, Fd, MsgHdr};
 
 use tracing::{trace, warn};
 
@@ -317,7 +317,11 @@ impl UnixStream {
     }
 }
 
-fn send_fds(sockfd: RawFd, bufs: &[IoSlice], fds: impl Iterator<Item = RawFd>) -> io::Result<usize> {
+fn send_fds(
+    sockfd: RawFd,
+    bufs: &[IoSlice],
+    fds: impl Iterator<Item = RawFd>,
+) -> io::Result<usize> {
     debug_assert_eq!(
         constants::CMSG_SCM_RIGHTS_SPACE as usize,
         cmsg_buffer_fds_space(constants::MAX_FD_COUNT)
@@ -374,9 +378,9 @@ fn recv_fds(
                 return Err(PushFailureError::new());
             }
         }
-   }
+    }
 
-   if recv.was_control_truncated() {
+    if recv.was_control_truncated() {
         warn!(
             source = "UnixStream",
             event = "read",

@@ -20,9 +20,9 @@ use std::{
 };
 
 use libc::{
-    cmsghdr, iovec, msghdr, recvmsg, sendmsg, CMSG_DATA, CMSG_FIRSTHDR, CMSG_LEN, CMSG_NXTHDR,
-    CMSG_SPACE, MSG_CTRUNC, SCM_RIGHTS, SOL_SOCKET,
-close};
+    close, cmsghdr, iovec, msghdr, recvmsg, sendmsg, CMSG_DATA, CMSG_FIRSTHDR, CMSG_LEN,
+    CMSG_NXTHDR, CMSG_SPACE, MSG_CTRUNC, SCM_RIGHTS, SOL_SOCKET,
+};
 use num_traits::One;
 
 #[derive(Debug)]
@@ -199,10 +199,10 @@ impl<'a> MsgHdr<'a, RecvStart> {
         // in so msg_control will still be a valid pointer for length
         // msg_controllen.
         Ok(MsgHdrRecvEnd {
-                mhdr: self.mhdr,
-                bytes_recvieved: count,
-                fds_taken: false,
-                _phantom: PhantomData,
+            mhdr: self.mhdr,
+            bytes_recvieved: count,
+            fds_taken: false,
+            _phantom: PhantomData,
         })
     }
 }
@@ -492,7 +492,7 @@ impl<'a> Drop for FdsIter<'a> {
     fn drop(&mut self) {
         for fd in self {
             drop(fd);
-       }
+        }
     }
 }
 
@@ -598,7 +598,8 @@ impl Drop for Fd {
 
 impl IntoRawFd for Fd {
     fn into_raw_fd(mut self) -> RawFd {
-        self.fd.take()
+        self.fd
+            .take()
             .expect("Attempt to take the RawFd contained in an Fd a second time")
     }
 }
