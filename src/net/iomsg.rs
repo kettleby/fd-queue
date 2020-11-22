@@ -15,7 +15,7 @@ use std::{
     marker::PhantomData,
     mem,
     ops::Neg,
-    os::unix::io::RawFd,
+    os::unix::io::{IntoRawFd, RawFd},
     ptr,
 };
 
@@ -135,6 +135,13 @@ struct FdsIterData {
     end: *const RawFd,
 }
 
+// A safe owner of a contained RawFd.
+#[derive(Debug)]
+pub struct Fd {
+    // Invariant: fd is None or Fd is the owner of the contained RawFd.
+    fd: Option<RawFd>,
+}
+
 impl<'a, State: Default> MsgHdr<'a, State> {
     // Safety: iov must be valid for length iov_len and the array that iov points to
     // must outlive the returned MsgHdr.
@@ -209,7 +216,7 @@ impl<'a> MsgHdrRecvEnd<'a> {
         self.mhdr.msg_flags & MSG_CTRUNC != 0
     }
 
-    pub fn take_fds<'b>(&'b mut self) -> impl Iterator<Item = RawFd> + 'b {
+    pub fn take_fds<'b>(&'b mut self) -> impl Iterator<Item = Fd> + 'b {
         if self.fds_taken {
             FdsIter::empty(&self.mhdr)
         } else {
@@ -457,7 +464,7 @@ impl<'a> FdsIter<'a> {
 }
 
 impl<'a> Iterator for FdsIter<'a> {
-    type Item = RawFd;
+    type Item = Fd;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -484,10 +491,8 @@ impl<'a> Iterator for FdsIter<'a> {
 impl<'a> Drop for FdsIter<'a> {
     fn drop(&mut self) {
         for fd in self {
-            // Safety: This is the only reference to the file descriptor
-            // in the process so it is safe to close it.
-            unsafe { close(fd) };
-        }
+            drop(fd);
+       }
     }
 }
 
@@ -540,7 +545,7 @@ impl FdsIterData {
 }
 
 impl Iterator for FdsIterData {
-    type Item = RawFd;
+    type Item = Fd;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.curr < self.end {
@@ -560,10 +565,41 @@ impl Iterator for FdsIterData {
             // invariant 3 being maintained imples that invariant 4 is maintained.
             self.curr = unsafe { self.curr.offset(1) };
 
-            Some(next)
+            // Precondtion: FdsIterData is the logical owner of all of the remaining
+            // file descriptors in the current cmsg. We have copied the next
+            // RawFd out of the logical slice of RawFd's and then advanced the curr
+            // pointer past that location. `next` is thus the only logical copy of
+            // that RawFd.
+            Some(Fd::new(next))
         } else {
             None
         }
+    }
+}
+
+impl Fd {
+    // Precondition: fd is the only retained copy of that RawFd.
+    fn new(fd: RawFd) -> Self {
+        // Invariant: the precondition means that this Fd can own the contained
+        // RawFd because there are no other copies of that RawFd.
+        Self { fd: Some(fd) }
+    }
+}
+
+impl Drop for Fd {
+    fn drop(&mut self) {
+        if let Some(fd) = self.fd {
+            // Safety: the invariant on self.fd means the owner of the
+            // contained RawFd is about to be dropped.
+            unsafe { close(fd) };
+        }
+    }
+}
+
+impl IntoRawFd for Fd {
+    fn into_raw_fd(mut self) -> RawFd {
+        self.fd.take()
+            .expect("Attempt to take the RawFd contained in an Fd a second time")
     }
 }
 

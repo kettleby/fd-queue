@@ -22,7 +22,7 @@ use std::{
 // needed until the MSRV is 1.43 when the associated constant becomes available
 use std::usize;
 
-use iomsg::{cmsg_buffer_fds_space, MsgHdr};
+use iomsg::{cmsg_buffer_fds_space, MsgHdr, Fd};
 
 use tracing::{trace, warn};
 
@@ -76,7 +76,7 @@ mod iomsg;
 #[derive(Debug)]
 pub struct UnixStream {
     inner: StdUnixStream,
-    infd: VecDeque<RawFd>,
+    infd: VecDeque<Fd>,
     outfd: Option<Vec<RawFd>>,
 }
 
@@ -347,7 +347,7 @@ impl UnixStream {
 fn recv_fds(
     sockfd: RawFd,
     bufs: &mut [IoSliceMut],
-    fds_sink: &mut impl Push<RawFd>,
+    fds_sink: &mut impl Push<Fd>,
 ) -> io::Result<usize> {
     debug_assert_eq!(
         constants::CMSG_SCM_RIGHTS_SPACE as usize,
@@ -365,7 +365,6 @@ fn recv_fds(
         match fds_sink.push(fd) {
             Ok(_) => fds_count += 1,
             Err(_) => {
-                // TODO: deal with the leak of fd at this point
                 warn!(
                     source = "UnixStream",
                     event = "read",
@@ -435,7 +434,7 @@ impl DequeueFd for UnixStream {
             event = "dequeue",
             count = if result.is_some() { 1 } else { 0 }
         );
-        result
+        result.map(|fd| fd.into_raw_fd())
     }
 }
 
@@ -513,8 +512,8 @@ impl From<StdUnixStream> for UnixStream {
     }
 }
 
-impl Push<RawFd> for VecDeque<RawFd> {
-    fn push(&mut self, item: RawFd) -> Result<(), RawFd> {
+impl Push<Fd> for VecDeque<Fd> {
+    fn push(&mut self, item: Fd) -> Result<(), Fd> {
         self.push_back(item);
         Ok(())
     }
