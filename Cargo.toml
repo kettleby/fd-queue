@@ -14,8 +14,6 @@ categories = ["asynchronous", "os::unix-apis"]
 net-fd = ["tracing"]
 mio-fd = ["net-fd", "mio"]
 tokio-fd = ["mio-fd", "tokio", "socket2", "pin-project", "futures-core", "futures-util"]
-# TODO: remove this; temporary to work around rust-analyzer issue
-default = ["net-fd"]
 
 [dependencies]
 tracing = {version = "0.1.15", optional = true}
