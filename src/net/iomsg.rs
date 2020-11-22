@@ -19,6 +19,9 @@ use std::{
     ptr,
 };
 
+// needed until the MSRV is 1.43 when the associated constant becomes available
+use std::isize;
+
 use libc::{
     close, cmsghdr, iovec, msghdr, recvmsg, sendmsg, CMSG_DATA, CMSG_FIRSTHDR, CMSG_LEN,
     CMSG_NXTHDR, CMSG_SPACE, MSG_CTRUNC, SCM_RIGHTS, SOL_SOCKET,
