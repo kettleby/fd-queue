@@ -6,27 +6,29 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms
 
-use std::collections::VecDeque;
-use std::fmt;
-use std::io::{self, prelude::*, Error, ErrorKind, IoSlice, IoSliceMut};
-use std::mem::size_of;
-use std::net::Shutdown;
-use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
-use std::os::unix::net::{SocketAddr, UnixListener as StdUnixListner, UnixStream as StdUnixStream};
-use std::path::Path;
-use std::slice;
+use std::{
+    collections::VecDeque,
+    fmt,
+    io::{self, prelude::*, Error, ErrorKind, IoSlice, IoSliceMut},
+    iter,
+    net::Shutdown,
+    os::unix::{
+        io::{AsRawFd, FromRawFd, IntoRawFd, RawFd},
+        net::{SocketAddr, UnixListener as StdUnixListner, UnixStream as StdUnixStream},
+    },
+    path::Path,
+};
 
 // needed until the MSRV is 1.43 when the associated constant becomes available
-use std::isize;
 use std::usize;
 
-use nix::cmsg_space;
-use nix::sys::socket::{recvmsg, sendmsg, ControlMessage, ControlMessageOwned, MsgFlags};
-use nix::sys::uio::IoVec;
+use iomsg::{cmsg_buffer_fds_space, Fd, MsgHdr};
 
 use tracing::{trace, warn};
 
 use crate::{DequeueFd, EnqueueFd, QueueFullError};
+
+mod iomsg;
 
 /// A structure representing a connected Unix socket with support for passing
 /// [`RawFd`][RawFd].
@@ -74,9 +76,8 @@ use crate::{DequeueFd, EnqueueFd, QueueFullError};
 #[derive(Debug)]
 pub struct UnixStream {
     inner: StdUnixStream,
-    infd: VecDeque<RawFd>,
+    infd: VecDeque<Fd>,
     outfd: Option<Vec<RawFd>>,
-    cmsg_buffer: Vec<u8>,
 }
 
 /// A structure representing a Unix domain socket server whose connected sockets
@@ -98,6 +99,13 @@ pub struct Incoming<'a> {
 
 #[derive(Debug)]
 struct CMsgTruncatedError {}
+
+#[derive(Debug)]
+struct PushFailureError {}
+
+trait Push<A> {
+    fn push(&mut self, item: A) -> Result<(), A>;
+}
 
 // === impl UnixStream ===
 impl UnixStream {
@@ -303,8 +311,92 @@ impl UnixStream {
         self.inner.shutdown(how)
     }
 
+    #[allow(dead_code)]
     pub(crate) fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
         self.inner.set_nonblocking(nonblocking)
+    }
+}
+
+fn send_fds(
+    sockfd: RawFd,
+    bufs: &[IoSlice],
+    fds: impl Iterator<Item = RawFd>,
+) -> io::Result<usize> {
+    debug_assert_eq!(
+        constants::CMSG_SCM_RIGHTS_SPACE as usize,
+        cmsg_buffer_fds_space(constants::MAX_FD_COUNT)
+    );
+    assert!(UnixStream::FD_QUEUE_SIZE <= constants::MAX_FD_COUNT);
+
+    // Size the buffer to be big enough to hold MAX_FD_COUNT RawFd's.
+    // The assertions above ensure that this is the case. The buffer
+    // must be zeroed because subsequent code will not clear padding
+    // bytes.
+    let mut cmsg_buffer = [0u8; constants::CMSG_SCM_RIGHTS_SPACE as _];
+
+    let counts = MsgHdr::from_io_slice(bufs, &mut cmsg_buffer)
+        .encode_fds(fds)?
+        .send(sockfd)?;
+
+    trace!(
+        source = "UnixStream",
+        event = "write",
+        fds_count = counts.fds_sent(),
+        byte_count = counts.bytes_sent(),
+    );
+
+    Ok(counts.bytes_sent())
+}
+
+fn recv_fds(
+    sockfd: RawFd,
+    bufs: &mut [IoSliceMut],
+    fds_sink: &mut impl Push<Fd>,
+) -> io::Result<usize> {
+    debug_assert_eq!(
+        constants::CMSG_SCM_RIGHTS_SPACE as usize,
+        cmsg_buffer_fds_space(constants::MAX_FD_COUNT)
+    );
+
+    // Size the buffer to be big enough to hold MAX_FD_COUNT RawFd's.
+    // The assertion above ensure that this is the case.
+    let mut cmsg_buffer = [0u8; constants::CMSG_SCM_RIGHTS_SPACE as _];
+
+    let mut recv = MsgHdr::from_io_slice_mut(bufs, &mut cmsg_buffer).recv(sockfd)?;
+
+    let mut fds_count = 0;
+    for fd in recv.take_fds() {
+        match fds_sink.push(fd) {
+            Ok(_) => fds_count += 1,
+            Err(_) => {
+                warn!(
+                    source = "UnixStream",
+                    event = "read",
+                    condition = "too many fds received"
+                );
+
+                return Err(PushFailureError::new());
+            }
+        }
+    }
+
+    if recv.was_control_truncated() {
+        warn!(
+            source = "UnixStream",
+            event = "read",
+            condition = "cmsgs truncated"
+        );
+
+        Err(CMsgTruncatedError::new())
+    } else {
+        trace!(
+            source = "UnixStream",
+            event = "read",
+            fds_count,
+            byte_count = recv.bytes_recvieved(),
+        );
+
+        Ok(recv.bytes_recvieved())
     }
 }
 
@@ -346,7 +438,7 @@ impl DequeueFd for UnixStream {
             event = "dequeue",
             count = if result.is_some() { 1 } else { 0 }
         );
-        result
+        result.map(|fd| fd.into_raw_fd())
     }
 }
 
@@ -367,69 +459,7 @@ impl Read for UnixStream {
     }
 
     fn read_vectored(&mut self, bufs: &mut [IoSliceMut]) -> io::Result<usize> {
-        assert_eq!(size_of::<IoSliceMut>(), size_of::<IoVec<&mut [u8]>>());
-        assert!((isize::MAX as usize) / size_of::<IoVec<&mut [u8]>>() >= bufs.len());
-
-        let bufs_ptr = bufs.as_mut_ptr();
-        let vecs_ptr = bufs_ptr as *mut IoVec<&mut [u8]>;
-
-        // Safety: from_raw_parts_mut(data, len) requires 3 things
-        //
-        //      1. data is valid (i.e. non-null and pointing to a single allocated
-        //         object)
-        //      2. the memory referenced by the returned slice must not be accessed
-        //         other than through that slice for the lifetime of the slice
-        //      3. len * size_of::<T>() <= isize::MAX
-        //
-        // For the first condition, vecs_ptr is is a pointer to the first byte of the
-        // bufs slice which is bufs.len() * size_of::<IoSliceMut> bytes long. The
-        // first assertion means that it is also bufs.len() *
-        // size_of::<IoVec<&mut[u8]>> bytes long. vecs_ptr thus points to the single
-        // allocated object bufs for its whole bufs.len * size_of::<IoVec<&mut[u8]>
-        // size. Since it is pointing to the first byte of a slice, it is non-null.
-        // It is properly aligned because it is equal to bufs_ptr (which is properly
-        // aligned) and because both IoSliceMut and IoVec<&mut [u8]> are guarenteed
-        // to have the same layout, specifically the layout of iovec C ABI type.
-        //
-        // For the second condition, all of bufs, bufs_ptr, vecs_ptr, and vecs
-        // reference the same memory, but only vecs is used in any manner after this
-        // call.
-        //
-        // For the third condition, the second assertion demonstarates that it holds
-        // (absent a panic).
-        let vecs = unsafe { slice::from_raw_parts_mut(vecs_ptr, bufs.len()) };
-
-        let msg = recvmsg(
-            self.as_raw_fd(),
-            &vecs,
-            Some(&mut self.cmsg_buffer),
-            MsgFlags::empty(),
-        )
-        .map_err(map_error)?;
-        if msg.flags.contains(MsgFlags::MSG_CTRUNC) {
-            warn!(
-                source = "UnixStream",
-                event = "read",
-                condition = "cmsgs truncated"
-            );
-            return Err(Error::new(ErrorKind::Other, CMsgTruncatedError::new()));
-        }
-
-        let mut fds_count = 0;
-        for c in msg.cmsgs() {
-            if let ControlMessageOwned::ScmRights(fds) = c {
-                self.infd.extend(fds);
-                fds_count += 1;
-            }
-        }
-
-        trace!(
-            source = "UnixStream",
-            event = "read",
-            fds_count,
-            byte_count = msg.bytes
-        );
-        Ok(msg.bytes)
+        recv_fds(self.as_raw_fd(), bufs, &mut self.infd)
     }
 }
 
@@ -445,56 +475,12 @@ impl Write for UnixStream {
     }
 
     fn write_vectored(&mut self, bufs: &[IoSlice]) -> io::Result<usize> {
-        assert_eq!(size_of::<IoSlice>(), size_of::<IoVec<&[u8]>>());
-        assert!((isize::MAX as usize) / size_of::<IoVec<&[u8]>>() >= bufs.len());
-
-        let bufs_ptr = bufs.as_ptr();
-        let vecs_ptr = bufs_ptr as *const IoVec<&[u8]>;
-
-        // Safety: from_raw_parts(data, len) requires three things:
-        //
-        //      1. data must be valid for len * size_of::<T>() bytes (non-null,
-        //         properly aligned, and the memory range from a single allocation).
-        //      2. The memory reference by the return slice must not be mutated for
-        //         the liftime of the slice.
-        //      3. len * size_of::<T>() <= isize::MAX
-        //
-        // For the first condtion vecs_ptr is non-null because it points to the first
-        // byte of bufs. It is properly aligned for IoVec<&[u8]> because it is
-        // properly aligned for IoSlice and IoVec<&[u8]> and IoSlice both have the
-        // same layout: the C ABI for an iovec. The first assertion above ensures
-        // that bufs.len() * size_of::<IoVec<&[u8]>> is the same as bufs.len() *
-        // size_of::<IoSlice> and both are the number of bytes in bufs, which is a
-        // single allocation.
-        //
-        // For the second condition, bufs, bufs_ptr, vecs, and vecs_ptr all refer to
-        // the same memory but they are all const pointers or shared references.
-        // There are no other references to that memory in this function and any such
-        // references in other functions must be through shared references (becuase
-        // bufs is a shared reference).
-        //
-        // For the third condition, the second assertion ensurse this is true.
-        let vecs = unsafe { slice::from_raw_parts(vecs_ptr, bufs.len()) };
-
         let outfd = self.outfd.take();
 
-        let fds = outfd.unwrap_or_else(Vec::new);
-        let fds_count = fds.len();
-        let cmsgs = if fds.is_empty() {
-            Vec::new()
-        } else {
-            vec![ControlMessage::ScmRights(&fds)]
-        };
-
-        let byte_count: usize = vecs.iter().map(|vec| vec.as_slice().len()).sum();
-        trace!(
-            source = "UnixStream",
-            event = "write",
-            fds_count,
-            byte_count
-        );
-
-        sendmsg(self.as_raw_fd(), &vecs, &cmsgs, MsgFlags::empty(), None).map_err(map_error)
+        match outfd {
+            Some(mut fds) => send_fds(self.as_raw_fd(), bufs, fds.drain(..)),
+            None => send_fds(self.as_raw_fd(), bufs, iter::empty()),
+        }
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -526,17 +512,14 @@ impl From<StdUnixStream> for UnixStream {
             inner,
             infd: VecDeque::with_capacity(Self::FD_QUEUE_SIZE),
             outfd: None,
-            cmsg_buffer: cmsg_space!([RawFd; Self::FD_QUEUE_SIZE]),
         }
     }
 }
 
-fn map_error(e: nix::Error) -> io::Error {
-    use nix::Error::*;
-
-    match e {
-        Sys(e) => io::Error::from_raw_os_error(e as i32),
-        _ => io::Error::new(io::ErrorKind::Other, Box::new(e)),
+impl Push<Fd> for VecDeque<Fd> {
+    fn push(&mut self, item: Fd) -> Result<(), Fd> {
+        self.push_back(item);
+        Ok(())
     }
 }
 
@@ -776,8 +759,8 @@ impl Iterator for Incoming<'_> {
 
 // === impl CMsgTruncatedError ===
 impl CMsgTruncatedError {
-    fn new() -> CMsgTruncatedError {
-        CMsgTruncatedError {}
+    fn new() -> Error {
+        Error::new(ErrorKind::Other, CMsgTruncatedError {})
     }
 }
 
@@ -791,6 +774,29 @@ impl fmt::Display for CMsgTruncatedError {
 }
 
 impl std::error::Error for CMsgTruncatedError {}
+
+// === impl PushFailureError ===
+impl PushFailureError {
+    fn new() -> Error {
+        Error::new(ErrorKind::Other, PushFailureError {})
+    }
+}
+
+impl fmt::Display for PushFailureError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "The sink for receiving file descriptors was unexpectedly full."
+        )
+    }
+}
+
+impl std::error::Error for PushFailureError {}
+
+// === precomputed constants generated by build.rs ===
+mod constants {
+    include!(concat!(env!("OUT_DIR"), "/constants.rs"));
+}
 
 #[cfg(test)]
 mod test {

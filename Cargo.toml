@@ -11,12 +11,11 @@ keywords = ["fd", "unix", "socket", "domain"]
 categories = ["asynchronous", "os::unix-apis"]
 
 [features]
-net-fd = ["nix", "tracing"]
+net-fd = ["tracing"]
 mio-fd = ["net-fd", "mio"]
 tokio-fd = ["mio-fd", "tokio", "socket2", "pin-project", "futures-core", "futures-util"]
 
 [dependencies]
-nix = {version = "0.17.0", optional = true}
 tracing = {version = "0.1.15", optional = true}
 mio = {version = "0.6.22", optional = true}
 tokio = {version = "0.2.21", optional = true, features = ["io-driver", "io-util"]}
@@ -24,11 +23,17 @@ pin-project = {version = "0.4.22", optional = true}
 futures-core = {version = "0.3.5", optional = true}
 futures-util = {version = "0.3.5", optional = true}
 socket2 = {version = "0.3.12", optional = true, features = ["unix"]}
+libc = "0.2.80"
+num-traits = "0.2.14"
 
 [dev-dependencies]
+nix = "0.17.0"
 tempfile = "3.1.0"
 assert_matches = "1.3.0"
 tokio = {version = "0.2.21", features = ["rt-threaded", "macros"]}
+
+[build-dependencies]
+libc = "0.2.80"
 
 [package.metadata.docs.rs]
 all-features = true
