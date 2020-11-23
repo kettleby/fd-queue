@@ -6,7 +6,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms
 
-//! Types to provide a safe interface around libc::recvmsg and libc::sendmsg.
+//! Types to provide a safe interface around `libc::recvmsg` and `libc::sendmsg`.
 
 use std::{
     convert::TryInto,
@@ -29,6 +29,7 @@ use libc::{
 use num_traits::One;
 
 #[derive(Debug)]
+/// The core type providing a safe interface to `libc::recvmsg` and `libc::sendmsg`.
 pub struct MsgHdr<'a, State> {
     // Invariant: mhdr is properly initalized with msg_name null, and with
     // msg_iov and msg_control valid pointers for length msg_iovlen and
@@ -117,7 +118,7 @@ pub struct SendEnd {
 impl NullableControl for SendEnd {}
 
 struct FdsIter<'a> {
-    // Invariant: mhdr is initalized as described in MsgHdr.that has
+    // Invariant: mhdr is initalized as described in MsgHdr that has
     // been filled in by a call to recvmsg.
     mhdr: &'a msghdr,
     // Invariant: cmsg is a valid cmsg based on mhdr (or None)
@@ -132,13 +133,13 @@ struct FdsIter<'a> {
 //          be all part of the same same array of initalized
 //          RawFd values.
 //      4. if curr != end then curr must be a valid pointer
-//  Note that neither curr nor end is assumed to be ali_gned.
+//  Note that neither curr nor end is assumed to be aligned.
 struct FdsIterData {
     curr: *const RawFd,
     end: *const RawFd,
 }
 
-// A safe owner of a contained RawFd.
+/// A safe owner of a contained RawFd.
 #[derive(Debug)]
 pub struct Fd {
     // Invariant: fd is None or Fd is the owner of the contained RawFd.
@@ -263,8 +264,8 @@ impl<'a> MsgHdr<'a, SendStart> {
     pub fn from_io_slice(bufs: &'a [IoSlice], cmsg_buffer: &'a mut [u8]) -> Self {
         // IoSlice guarentees ABI compatibility with iovec. sendmsg doesn't
         // mutate the iovec array but the standard says it takes a mutable
-        // pointer so this transmutes he pointer into a mutable one. The Role
-        // constraint of Sender on MsgHdr will prevent calling recvmsg on the
+        // pointer so this transmutes he pointer into a mutable one. The State
+        // constraint of SendStart on MsgHdr will prevent calling recvmsg on the
         // underlying msghdr.
         let iov: *mut iovec = bufs.as_ptr() as *mut iovec;
         let iov_len = bufs.len();
@@ -630,7 +631,6 @@ impl error::Error for CMsgBufferTooSmallError {}
 
 /// Returns the size needed for a msghdr control buffer big
 /// enough to hold `count` `RawFd`'s.
-#[allow(dead_code)]
 pub fn cmsg_buffer_fds_space(count: usize) -> usize {
     // Safety: CMSG_SPACE is safe
     unsafe { CMSG_SPACE((count * mem::size_of::<RawFd>()) as u32) as usize }
