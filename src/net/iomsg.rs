@@ -648,3 +648,100 @@ where
         Ok(res)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn recv_end_take_fds_twice_is_empty() {
+        let mut control_buffer = [0u8; 1024];
+        let bufs: [IoSlice; 0] = [];
+        let fds = [1, 2, 3, 4];
+        let mhdr = MsgHdr::from_io_slice(&bufs, &mut control_buffer)
+            .encode_fds(fds.iter().map(|fd| *fd))
+            .expect("Can't encode fds");
+
+        let mut sut = MsgHdrRecvEnd{
+            mhdr: mhdr.mhdr,
+            bytes_recvieved: 0,
+            fds_taken: false,
+            _phantom: PhantomData,
+        };
+        // the encoded fds are fake so don't really drop them
+        mem::forget(sut.take_fds());
+        let taken = sut.take_fds();
+
+        assert_eq!(taken.count(), 0);
+    }
+
+    #[test]
+    fn start_send_encode_fds_with_small_buffer_is_error() {
+        let mut control_buffer = vec![0u8; cmsg_buffer_fds_space(1)];
+        let bufs: [IoSlice; 0] = [];
+        let fds = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+        let sut = MsgHdr::from_io_slice(&bufs, &mut control_buffer);
+        let result = sut.encode_fds(fds.iter().map(|fd| *fd));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn recv_end_take_fds_handle_non_scm_rights() {
+        let mut control_buffer = vec![0u8; cmsg_buffer_fds_space(4) + cmsg_buffer_cred_size()];
+        let fds = [1, 2, 3, 4];
+        let bufs: [IoSlice; 0] = [];
+        let mhdr = MsgHdr::from_io_slice(&bufs, &mut control_buffer);
+        unsafe {
+            let mut cmsg = CMSG_FIRSTHDR(&mhdr.mhdr);
+            assert_ne!(cmsg, ptr::null_mut());
+            encode_fake_cred(cmsg);
+            cmsg = CMSG_NXTHDR(&mhdr.mhdr, cmsg);
+            assert_ne!(cmsg, ptr::null_mut());
+            encode_fds(cmsg, &fds);
+        }
+        let mut count = 0;
+
+        let mut sut = MsgHdrRecvEnd{
+            mhdr: mhdr.mhdr,
+            bytes_recvieved: 0,
+            fds_taken: false,
+            _phantom: PhantomData,
+        };
+        for fd in sut.take_fds() {
+            count += 1;
+            // the encoded fds are fake so don't drop them
+            let _ = fd.into_raw_fd();
+        }
+
+        assert_eq!(count, fds.len());
+    }
+
+    unsafe fn encode_fds(cmsg: *mut cmsghdr, fds: &[RawFd]) {
+        let data_size = fds.len() * mem::size_of::<RawFd>();
+        (*cmsg).cmsg_len = CMSG_LEN((data_size)as u32) as usize;
+        (*cmsg).cmsg_level = SOL_SOCKET;
+        (*cmsg).cmsg_type = SCM_RIGHTS;
+
+        ptr::copy_nonoverlapping(fds.as_ptr() as *const u8, CMSG_DATA(cmsg), data_size);
+    }
+
+    fn cmsg_buffer_cred_size() -> usize {
+        unsafe { CMSG_SPACE(mem::size_of::<libc::ucred>() as u32) as usize }
+    }
+
+    unsafe fn encode_fake_cred(cmsg: *mut cmsghdr) {
+        let data_size = mem::size_of::<libc::ucred>();
+        (*cmsg).cmsg_len = CMSG_LEN((data_size)as u32) as usize;
+        (*cmsg).cmsg_level = SOL_SOCKET;
+        (*cmsg).cmsg_type = libc::SCM_CREDENTIALS;
+
+        let fake_cred = libc::ucred {
+            pid: 5,
+            uid: 2,
+            gid: 2,
+        };
+        ptr::copy_nonoverlapping(&fake_cred as *const libc::ucred as *const u8, CMSG_DATA(cmsg), data_size);
+    }
+}
