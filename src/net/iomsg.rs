@@ -803,6 +803,19 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[test]
+    fn recv_start_recv_on_non_socket_is_error() {
+        let mut control_buffer = [0u8; 0];
+        let mut bytes = [1u8, 2, 3, 4, 5];
+        let mut bufs = [IoSliceMut::new(&mut bytes)];
+        let file = tempfile::tempfile().expect("Can't get temporary file.");
+
+        let sut = MsgHdr::from_io_slice_mut(&mut bufs, &mut control_buffer);
+        let result = sut.recv(file.as_raw_fd());
+
+        assert!(result.is_err());
+    }
+
     unsafe fn encode_fds(cmsg: *mut cmsghdr, fds: &[RawFd]) {
         let data_size = fds.len() * mem::size_of::<RawFd>();
         (*cmsg).cmsg_len = CMSG_LEN((data_size) as u32) as usize;
