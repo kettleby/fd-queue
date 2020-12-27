@@ -16,17 +16,16 @@ use std::{
     mem,
     ops::Neg,
     os::unix::io::{IntoRawFd, RawFd},
-    ptr,
+    ptr::{self, NonNull},
     slice,
 };
 
 // needed until the MSRV is 1.43 when the associated constant becomes available
 use std::isize;
 
-use ptr::NonNull;
 use libc::{
-    c_int, c_uint, close, cmsghdr, iovec, msghdr, recvmsg, sendmsg, CMSG_DATA, CMSG_FIRSTHDR, CMSG_LEN,
-    CMSG_NXTHDR, CMSG_SPACE, MSG_CTRUNC, SCM_RIGHTS, SOL_SOCKET,
+    c_int, c_uint, close, cmsghdr, iovec, msghdr, recvmsg, sendmsg, CMSG_DATA, CMSG_FIRSTHDR,
+    CMSG_LEN, CMSG_NXTHDR, CMSG_SPACE, MSG_CTRUNC, SCM_RIGHTS, SOL_SOCKET,
 };
 use num_traits::One;
 
@@ -580,8 +579,8 @@ impl<'a> CMsgMut<'a> {
             // end of this buffer. The "try_into().unwrap()" ensures that
             // msg_controllen does not overflow an isize (and the offset is
             // already in bytes).
-            let control_max = (mhdr.msg_control.cast::<u8>())
-                .offset(mhdr.msg_controllen.try_into().unwrap());
+            let control_max =
+                (mhdr.msg_control.cast::<u8>()).offset(mhdr.msg_controllen.try_into().unwrap());
             // Safety: cmsg is a non-null return from CMSG_FIRSTHDR.
             let data = CMSG_DATA(cmsg);
             let data_size = (control_max as usize) - (data as usize);
@@ -600,7 +599,10 @@ impl<'a> CMsgMut<'a> {
             // the msg_control buffer which is valid for reads and writes (and
             // is initialized as a byte buffer so the remaining bytes after the
             // cmsghdr are initialized as bytes).
-            Some( Self { cmsg: NonNull::new_unchecked(cmsg), _phantom: PhantomData } )
+            Some(Self {
+                cmsg: NonNull::new_unchecked(cmsg),
+                _phantom: PhantomData,
+            })
         }
     }
 
@@ -730,7 +732,7 @@ mod tests {
             .encode_fds(fds.iter().map(|fd| *fd))
             .expect("Can't encode fds");
 
-        let mut sut = MsgHdrRecvEnd{
+        let mut sut = MsgHdrRecvEnd {
             mhdr: mhdr.mhdr,
             bytes_recvieved: 0,
             fds_taken: false,
@@ -771,7 +773,7 @@ mod tests {
         }
         let mut count = 0;
 
-        let mut sut = MsgHdrRecvEnd{
+        let mut sut = MsgHdrRecvEnd {
             mhdr: mhdr.mhdr,
             bytes_recvieved: 0,
             fds_taken: false,
@@ -788,11 +790,10 @@ mod tests {
 
     #[test]
     fn send_ready_send_on_non_socket_is_error() {
-        let mut control_buffer = [0u8;0];
+        let mut control_buffer = [0u8; 0];
         let bytes = [1u8, 2, 3, 4, 5];
         let bufs = [IoSlice::new(&bytes)];
-        let file = tempfile::tempfile()
-            .expect("Can't get temporary file.");
+        let file = tempfile::tempfile().expect("Can't get temporary file.");
 
         let sut = MsgHdr::from_io_slice(&bufs, &mut control_buffer)
             .encode_fds(iter::empty())
@@ -804,7 +805,7 @@ mod tests {
 
     unsafe fn encode_fds(cmsg: *mut cmsghdr, fds: &[RawFd]) {
         let data_size = fds.len() * mem::size_of::<RawFd>();
-        (*cmsg).cmsg_len = CMSG_LEN((data_size)as u32) as usize;
+        (*cmsg).cmsg_len = CMSG_LEN((data_size) as u32) as usize;
         (*cmsg).cmsg_level = SOL_SOCKET;
         (*cmsg).cmsg_type = SCM_RIGHTS;
 
@@ -817,7 +818,7 @@ mod tests {
 
     unsafe fn encode_fake_cred(cmsg: *mut cmsghdr) {
         let data_size = mem::size_of::<libc::ucred>();
-        (*cmsg).cmsg_len = CMSG_LEN((data_size)as u32) as usize;
+        (*cmsg).cmsg_len = CMSG_LEN((data_size) as u32) as usize;
         (*cmsg).cmsg_level = SOL_SOCKET;
         (*cmsg).cmsg_type = libc::SCM_CREDENTIALS;
 
@@ -826,6 +827,10 @@ mod tests {
             uid: 2,
             gid: 2,
         };
-        ptr::copy_nonoverlapping(&fake_cred as *const libc::ucred as *const u8, CMSG_DATA(cmsg), data_size);
+        ptr::copy_nonoverlapping(
+            &fake_cred as *const libc::ucred as *const u8,
+            CMSG_DATA(cmsg),
+            data_size,
+        );
     }
 }
