@@ -16,15 +16,16 @@ use std::{
     mem,
     ops::Neg,
     os::unix::io::{IntoRawFd, RawFd},
-    ptr,
+    ptr::{self, NonNull},
+    slice,
 };
 
 // needed until the MSRV is 1.43 when the associated constant becomes available
 use std::isize;
 
 use libc::{
-    close, cmsghdr, iovec, msghdr, recvmsg, sendmsg, CMSG_DATA, CMSG_FIRSTHDR, CMSG_LEN,
-    CMSG_NXTHDR, CMSG_SPACE, MSG_CTRUNC, SCM_RIGHTS, SOL_SOCKET,
+    c_int, c_uint, close, cmsghdr, iovec, msghdr, recvmsg, sendmsg, CMSG_DATA, CMSG_FIRSTHDR,
+    CMSG_LEN, CMSG_NXTHDR, CMSG_SPACE, MSG_CTRUNC, SCM_RIGHTS, SOL_SOCKET,
 };
 use num_traits::One;
 
@@ -137,6 +138,17 @@ struct FdsIter<'a> {
 struct FdsIterData {
     curr: *const RawFd,
     end: *const RawFd,
+}
+
+struct CMsgMut<'a> {
+    // Invariant: cmsg is a properly aligned, dereferenceable cmsghdr
+    // that has been initalized. It must also not be possible to
+    // get a different pointer to the memory pointed to by cmsg. Finally,
+    // the bytes buffer pointed to by cmsg must be valid for
+    // reads and writes for cmsg.cmsg_len bytes and the bytes in this
+    // range after the cmsghdr must be initalized.
+    cmsg: NonNull<cmsghdr>,
+    _phantom: PhantomData<&'a mut msghdr>,
 }
 
 /// A safe owner of a contained RawFd.
@@ -282,66 +294,34 @@ impl<'a> MsgHdr<'a, SendStart> {
         mut self,
         fds: impl Iterator<Item = RawFd>,
     ) -> io::Result<MsgHdr<'a, SendReady>> {
-        // Safety: the invariant on self.mhdr makes this call safe.
-        let cmsg = unsafe { CMSG_FIRSTHDR(&self.mhdr) };
-
-        // Safety: cmsg was initalized by a call to CMSG_FIRSTHDR above.
-        let p = unsafe { CMSG_DATA(cmsg) };
-        // Safety: the invariant on self.mhdr and the defintion of the msg_control*
-        // fields of a msghdr make this pointer arithmatic calculate a byte
-        // point to one past the end of the msg_control buffer.
-        let p_max = unsafe {
-            (self.mhdr.msg_control.cast::<u8>())
-                .offset(self.mhdr.msg_controllen.try_into().unwrap())
-        };
-        let data_size = (p_max as usize) - (p as usize);
-        assert!(data_size <= (isize::MAX as usize));
-        // this rounds down to the maximum number of file descriptors that can
-        // fit in the msg_control buffer.
-        let fds_count: usize = data_size / mem::size_of::<RawFd>();
-
-        let mut curr = p.cast::<RawFd>();
-        // Safety: curr is the start of the cmsg data buffer which is a part of
-        // the mhdr control buffer; the way fds_count is calculated above means
-        // that curr.offset() points either within the control buffer or to the
-        // first byte after the control buffer. The offset in bytes is at most
-        // data_size (by the way fds_count is calculated) which is asserted to
-        // be no more than isize::MAX.
-        let end = unsafe { curr.offset(fds_count.try_into().unwrap()) };
-
-        let mut count = 0;
-        for fd in fds {
-            if curr >= end {
-                return Err(CMsgBufferTooSmallError::new());
+        // Safety: the invariants on self.mhdr satify the preconditions of first_cmsg.
+        let count = match unsafe { CMsgMut::first_cmsg(&mut self.mhdr, SOL_SOCKET, SCM_RIGHTS) } {
+            None => {
+                if fds.count() > 0 {
+                    return Err(CMsgBufferTooSmallError::new());
+                }
+                0
             }
+            Some(mut cmsg) => {
+                let mut count = 0;
+                let mut data = cmsg.data();
 
-            // Safety: curr is initalized to the start of the cmsg data buffer and
-            // advanced within that buffer (through the offset() call below and the
-            // test against end above). It is thus a non-null pointer within a single
-            // object which is a subset of the msg_control buffer, and hence is
-            // dereferenceable. curr is therefore valid for write.
-            unsafe { curr.write_unaligned(fd) };
+                for fd in fds {
+                    let fd_size = mem::size_of_val(&fd);
+                    if data.len() < fd_size {
+                        return Err(CMsgBufferTooSmallError::new());
+                    }
 
-            // Safety: curr is intitially the start of the cmsg data buffer and
-            // is tested above to be less than the end of the buffer (end is
-            // calculated to be an integral number of RawFd's from the start of
-            // the buffer). curr.offset() (and hence curr on the next time through
-            // the loop) is either still within the buffer or is at most one byte
-            // past the end. A single RawFd sized offset satifies the offset
-            // related requirements of the offset() method.
-            curr = unsafe { curr.offset(1) };
-            count += 1;
-        }
+                    let (nextval, nextdata) = data.split_at_mut(fd_size);
+                    nextval.copy_from_slice(&fd.to_ne_bytes());
 
-        let size: u32 = (count * mem::size_of::<RawFd>())
-            .try_into()
-            .expect("Attempt to send too many RawFd's at once: overflowed a u32.");
-        // Safety: cmsg was properly initalized by a call to CMSG_FIRSTHDR above.
-        unsafe {
-            (*cmsg).cmsg_len = CMSG_LEN(size).try_into().unwrap();
-            (*cmsg).cmsg_level = SOL_SOCKET;
-            (*cmsg).cmsg_type = SCM_RIGHTS;
-        }
+                    data = nextdata;
+                    count += 1;
+                }
+                cmsg.shrink_data_len((count * mem::size_of::<RawFd>()).try_into().unwrap());
+                count
+            }
+        };
 
         // Adjust msg_control* now that we know the count of the fds
         if count == 0 {
@@ -581,6 +561,94 @@ impl Iterator for FdsIterData {
     }
 }
 
+impl<'a> CMsgMut<'a> {
+    // Safety: mhdr.msg_control must be null or point to an initalized byte
+    // buffer of length mhdr.msg_controllen that lives at least as long as mhdr.
+    // The byte buffer starting at msg_control must be part of a single allocated
+    // object.
+    unsafe fn first_cmsg(mhdr: &'a mut msghdr, level: c_int, typ: c_int) -> Option<Self> {
+        // Safety: the precondition on mhdr ensures that it is safe to call
+        // CMSG_FIRSTHDR.
+        let cmsg = CMSG_FIRSTHDR(mhdr);
+
+        if cmsg == ptr::null_mut() {
+            None
+        } else {
+            // Safety: from the precondition msg_control points to a byte
+            // buffer of length msg_controllen so control_max is one past the
+            // end of this buffer. The "try_into().unwrap()" ensures that
+            // msg_controllen does not overflow an isize (and the offset is
+            // already in bytes).
+            let control_max =
+                (mhdr.msg_control.cast::<u8>()).offset(mhdr.msg_controllen.try_into().unwrap());
+            // Safety: cmsg is a non-null return from CMSG_FIRSTHDR.
+            let data = CMSG_DATA(cmsg);
+            let data_size = (control_max as usize) - (data as usize);
+            // Safety: CMSG_LEN is safe.
+            let max_len = CMSG_LEN(data_size.try_into().unwrap());
+
+            // Safety: cmsg is a non-null return of CMSG_FIRSTHDR.
+            (*cmsg).cmsg_level = level;
+            (*cmsg).cmsg_type = typ;
+            (*cmsg).cmsg_len = max_len.try_into().unwrap();
+
+            // Safety (for new_unchecked): we check above the cmsg is not null.
+            // Invariants: cmsg is alligned and dereferenceable because it comes
+            // from CMSG_FIRSTHDR and it is initialized above. cmsg_len is
+            // calculated to ensure the byte buffer starting at cmsg is within
+            // the msg_control buffer which is valid for reads and writes (and
+            // is initialized as a byte buffer so the remaining bytes after the
+            // cmsghdr are initialized as bytes).
+            Some(Self {
+                cmsg: NonNull::new_unchecked(cmsg),
+                _phantom: PhantomData,
+            })
+        }
+    }
+
+    fn shrink_data_len(&mut self, len: c_uint) {
+        // Safety: CMSG_LEN is safe for any input.
+        let cmsg_len = unsafe { CMSG_LEN(len) }.try_into().unwrap();
+        // Safety: from the invariant self.cmsg is properly aligned, dereferenceable
+        // and has been initalized. The only pointer to the memory pointed to
+        // by self.cmsg is self.cmsg so the only way to read/write this memory
+        // for the rest of this method is through cmsg.
+        let mut cmsg = unsafe { self.cmsg.as_mut() };
+        if cmsg_len < cmsg.cmsg_len {
+            // Invariant: shrinking cmsg.cmsg_len maintains the invariant
+            // that the bytes buffer pointed to by cmsg is valid for reads
+            // and writes for cmsg.cmsg_len bytes.
+            cmsg.cmsg_len = cmsg_len;
+        }
+    }
+
+    fn data(&mut self) -> &mut [u8] {
+        // Safety: from the invariant self.cmsg is properly aligned, dereferenceable
+        // and has been initalized. self.cmsg is the only pointer to the cmsghdr
+        // that can be accessed.
+        let cmsg = unsafe { self.cmsg.as_ref() };
+        // cmsg points to a properly initalized and aligned cmsghdr.
+        let data: *mut u8 = unsafe { CMSG_DATA(cmsg) };
+
+        let hdr_size = (data as usize) - (cmsg as *const cmsghdr as usize);
+        let data_size = (cmsg).cmsg_len - hdr_size;
+
+        assert!(data_size <= (isize::MAX as usize));
+        // Safety: CMSG_DATA means that data points to the data portion of the
+        // cmsg (and is non-null). data_size is calculated as the size of the
+        // whole cmsg less the part that is before data (the cmsghdr and any
+        // padding). The invariant on self.cmsg means that the whole of byte
+        // buffer starting from data for data_size bytes is valid for reads
+        // and writes (because the byte buffer from cmsg for cmsg.cmsg_len
+        // bytes is) and is initalized. Finally, the lifetime bounds on this
+        // method and the invariant on self.cmsg that there are no other
+        // pointers to the memory pointed to by self.cmsg mean that it is not
+        // possible to access the memory in the returned slice except through
+        // that slice so long as that slice is live.
+        unsafe { slice::from_raw_parts_mut(data, data_size) }
+    }
+}
+
 impl Fd {
     // Precondition: fd is the only retained copy of that RawFd.
     fn new(fd: RawFd) -> Self {
@@ -646,5 +714,136 @@ where
         Err(io::Error::last_os_error())
     } else {
         Ok(res)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use std::{iter, os::unix::io::AsRawFd};
+
+    #[test]
+    fn recv_end_take_fds_twice_is_empty() {
+        let mut control_buffer = [0u8; 1024];
+        let bufs: [IoSlice; 0] = [];
+        let fds = [1, 2, 3, 4];
+        let mhdr = MsgHdr::from_io_slice(&bufs, &mut control_buffer)
+            .encode_fds(fds.iter().map(|fd| *fd))
+            .expect("Can't encode fds");
+
+        let mut sut = MsgHdrRecvEnd {
+            mhdr: mhdr.mhdr,
+            bytes_recvieved: 0,
+            fds_taken: false,
+            _phantom: PhantomData,
+        };
+        // the encoded fds are fake so don't really drop them
+        mem::forget(sut.take_fds());
+        let taken = sut.take_fds();
+
+        assert_eq!(taken.count(), 0);
+    }
+
+    #[test]
+    fn start_send_encode_fds_with_small_buffer_is_error() {
+        let mut control_buffer = vec![0u8; cmsg_buffer_fds_space(1)];
+        let bufs: [IoSlice; 0] = [];
+        let fds = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10];
+
+        let sut = MsgHdr::from_io_slice(&bufs, &mut control_buffer);
+        let result = sut.encode_fds(fds.iter().map(|fd| *fd));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn recv_end_take_fds_handle_non_scm_rights() {
+        let mut control_buffer = vec![0u8; cmsg_buffer_fds_space(4) + cmsg_buffer_cred_size()];
+        let fds = [1, 2, 3, 4];
+        let bufs: [IoSlice; 0] = [];
+        let mhdr = MsgHdr::from_io_slice(&bufs, &mut control_buffer);
+        unsafe {
+            let mut cmsg = CMSG_FIRSTHDR(&mhdr.mhdr);
+            assert_ne!(cmsg, ptr::null_mut());
+            encode_fake_cred(cmsg);
+            cmsg = CMSG_NXTHDR(&mhdr.mhdr, cmsg);
+            assert_ne!(cmsg, ptr::null_mut());
+            encode_fds(cmsg, &fds);
+        }
+        let mut count = 0;
+
+        let mut sut = MsgHdrRecvEnd {
+            mhdr: mhdr.mhdr,
+            bytes_recvieved: 0,
+            fds_taken: false,
+            _phantom: PhantomData,
+        };
+        for fd in sut.take_fds() {
+            count += 1;
+            // the encoded fds are fake so don't drop them
+            let _ = fd.into_raw_fd();
+        }
+
+        assert_eq!(count, fds.len());
+    }
+
+    #[test]
+    fn send_ready_send_on_non_socket_is_error() {
+        let mut control_buffer = [0u8; 0];
+        let bytes = [1u8, 2, 3, 4, 5];
+        let bufs = [IoSlice::new(&bytes)];
+        let file = tempfile::tempfile().expect("Can't get temporary file.");
+
+        let sut = MsgHdr::from_io_slice(&bufs, &mut control_buffer)
+            .encode_fds(iter::empty())
+            .expect("Can't encode fds");
+        let result = sut.send(file.as_raw_fd());
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn recv_start_recv_on_non_socket_is_error() {
+        let mut control_buffer = [0u8; 0];
+        let mut bytes = [1u8, 2, 3, 4, 5];
+        let mut bufs = [IoSliceMut::new(&mut bytes)];
+        let file = tempfile::tempfile().expect("Can't get temporary file.");
+
+        let sut = MsgHdr::from_io_slice_mut(&mut bufs, &mut control_buffer);
+        let result = sut.recv(file.as_raw_fd());
+
+        assert!(result.is_err());
+    }
+
+    unsafe fn encode_fds(cmsg: *mut cmsghdr, fds: &[RawFd]) {
+        let data_size = fds.len() * mem::size_of::<RawFd>();
+        (*cmsg).cmsg_len = CMSG_LEN((data_size) as u32) as usize;
+        (*cmsg).cmsg_level = SOL_SOCKET;
+        (*cmsg).cmsg_type = SCM_RIGHTS;
+
+        ptr::copy_nonoverlapping(fds.as_ptr() as *const u8, CMSG_DATA(cmsg), data_size);
+    }
+
+    fn cmsg_buffer_cred_size() -> usize {
+        unsafe { CMSG_SPACE(mem::size_of::<libc::ucred>() as u32) as usize }
+    }
+
+    unsafe fn encode_fake_cred(cmsg: *mut cmsghdr) {
+        let data_size = mem::size_of::<libc::ucred>();
+        (*cmsg).cmsg_len = CMSG_LEN((data_size) as u32) as usize;
+        (*cmsg).cmsg_level = SOL_SOCKET;
+        (*cmsg).cmsg_type = libc::SCM_CREDENTIALS;
+
+        let fake_cred = libc::ucred {
+            pid: 5,
+            uid: 2,
+            gid: 2,
+        };
+        ptr::copy_nonoverlapping(
+            &fake_cred as *const libc::ucred as *const u8,
+            CMSG_DATA(cmsg),
+            data_size,
+        );
     }
 }
