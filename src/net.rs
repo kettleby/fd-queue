@@ -709,6 +709,10 @@ impl UnixListener {
     pub fn incoming(&self) -> Incoming {
         Incoming { listener: self }
     }
+
+    pub(crate) fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        self.inner.set_nonblocking(nonblocking)
+    }
 }
 
 impl AsRawFd for UnixListener {

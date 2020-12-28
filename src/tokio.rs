@@ -8,22 +8,25 @@
 
 //! An implementation of `EnqueueFd` and `DequeueFd` that is integrated with tokio.
 
-use std::convert::{TryFrom, TryInto};
-use std::net::Shutdown;
-use std::os::unix::{
-    io::{AsRawFd, RawFd},
-    net::{SocketAddr, UnixStream as StdUnixStream},
+use std:: {
+    convert::{TryFrom, TryInto},
+    io::{Read, Write},
+    os::unix::{
+        io::{AsRawFd, RawFd},
+        net::{SocketAddr, UnixStream as StdUnixStream},
+    },
+    net::Shutdown,
+    path::Path,
+    pin::Pin,
+    task::{Context, Poll},
 };
-use std::path::Path;
-use std::pin::Pin;
-use std::task::{Context, Poll};
+
 
 use futures_core::stream::Stream;
 use futures_util::{future::poll_fn, ready};
-use mio::Ready;
 use pin_project::pin_project;
 use socket2::{Domain, SockAddr, Socket, Type};
-use tokio::io::{self, AsyncRead, AsyncWrite, PollEvented};
+use tokio::io::{self, AsyncRead, AsyncWrite, ReadBuf, unix::AsyncFd};
 
 use crate::{DequeueFd, EnqueueFd, QueueFullError};
 
@@ -35,8 +38,7 @@ use crate::{DequeueFd, EnqueueFd, QueueFullError};
 #[pin_project]
 #[derive(Debug)]
 pub struct UnixStream {
-    #[pin]
-    inner: PollEvented<crate::mio::UnixStream>,
+    inner: AsyncFd<crate::net::UnixStream>,
 }
 
 /// A Unix socket which can accept connections from other Unix sockets.
@@ -47,7 +49,7 @@ pub struct UnixStream {
 /// Iterating over it is equivalent to calling accept in a loop.
 #[derive(Debug)]
 pub struct UnixListener {
-    inner: PollEvented<crate::mio::UnixListener>,
+    inner: AsyncFd<crate::net::UnixListener>,
 }
 
 // === impl UnixStream ===
@@ -57,8 +59,6 @@ impl UnixStream {
     ///
     /// This function will create a new socket and connect the the path specifed,
     /// associating the returned stream with the default event loop's handle.
-    ///
-    /// For now, this is a synchronous function.
     pub async fn connect(path: impl AsRef<Path>) -> io::Result<UnixStream> {
         let typ = Type::stream().non_blocking().cloexec();
         let socket = Socket::new(Domain::unix(), typ, None)?;
@@ -71,7 +71,7 @@ impl UnixStream {
         }
 
         let stream: UnixStream = socket.into_unix_stream().try_into()?;
-        poll_fn(|cx| stream.inner.poll_write_ready(cx)).await?;
+        poll_fn(|cx| stream.inner.poll_write_ready(cx)).await?.retain_ready();
         Ok(stream)
     }
 
@@ -81,7 +81,7 @@ impl UnixStream {
     /// communicating back and forth between one another. Each socket will be
     /// associted with the default event loop's handle.
     pub fn pair() -> io::Result<(UnixStream, UnixStream)> {
-        let (stream1, stream2) = crate::mio::UnixStream::pair()?;
+        let (stream1, stream2) = crate::net::UnixStream::pair()?;
         Ok((stream1.try_into()?, stream2.try_into()?))
     }
 
@@ -132,32 +132,58 @@ impl AsyncRead for UnixStream {
     fn poll_read(
         self: Pin<&mut Self>,
         cx: &mut Context,
-        buf: &mut [u8],
-    ) -> Poll<io::Result<usize>> {
-        self.project().inner.poll_read(cx, buf)
+        buf: &mut ReadBuf,
+    ) -> Poll<io::Result<()>> {
+        let inner = self.project().inner;
+
+        let mut guard = ready!(inner.poll_read_ready_mut(cx))?;
+        // TODO: add support for reading into uninitilized memory.
+        let bufinit = buf.initialize_unfilled();
+        match guard.try_io(|inner| inner.get_mut().read(bufinit)) {
+            Err(_) => Poll::Pending,
+            Ok(Err(e)) => Poll::Ready(Err(e)),
+            Ok(Ok(count)) => {
+                buf.advance(count);
+                Poll::Ready(Ok(()))
+            }
+        }
     }
 }
 
 impl AsyncWrite for UnixStream {
     fn poll_write(self: Pin<&mut Self>, cx: &mut Context, buf: &[u8]) -> Poll<io::Result<usize>> {
-        self.project().inner.poll_write(cx, buf)
+        let inner = self.project().inner;
+
+        let mut guard = ready!(inner.poll_write_ready_mut(cx))?;
+        match guard.try_io(|inner| inner.get_mut().write(buf)) {
+            Err(_) => Poll::Pending,
+            Ok(Err(e)) => Poll::Ready(Err(e)),
+            Ok(Ok(count)) => Poll::Ready(Ok(count)),
+        }
     }
 
-    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
-        self.project().inner.poll_flush(cx)
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<io::Result<()>> {
+        Poll::Ready(Ok(()))
     }
 
-    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context) -> Poll<io::Result<()>> {
-        self.project().inner.poll_shutdown(cx)
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context) -> Poll<io::Result<()>> {
+        let inner = self.project().inner;
+
+        match inner.get_mut().shutdown(Shutdown::Write) {
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => Poll::Pending,
+            Err(e) => Poll::Ready(Err(e)),
+            Ok(()) => Poll::Ready(Ok(())),
+        }
     }
 }
 
-impl TryFrom<crate::mio::UnixStream> for UnixStream {
+impl TryFrom<crate::net::UnixStream> for UnixStream {
     type Error = io::Error;
 
-    fn try_from(inner: crate::mio::UnixStream) -> io::Result<UnixStream> {
+    fn try_from(inner: crate::net::UnixStream) -> io::Result<UnixStream> {
+        inner.set_nonblocking(true)?;
         Ok(UnixStream {
-            inner: PollEvented::new(inner)?,
+            inner: AsyncFd::new(inner)?,
         })
     }
 }
@@ -166,8 +192,8 @@ impl TryFrom<StdUnixStream> for UnixStream {
     type Error = io::Error;
 
     fn try_from(inner: StdUnixStream) -> Result<Self, Self::Error> {
-        let mio_stream = crate::mio::UnixStream::try_from(inner)?;
-        mio_stream.try_into()
+        let net_stream = crate::net::UnixStream::from(inner);
+        net_stream.try_into()
     }
 }
 
@@ -187,7 +213,7 @@ impl UnixListener {
     /// future driven by a tokio runtime, otherwise runtime can be set explicitly
     /// with `Handle::enter` function.
     pub fn bind(path: impl AsRef<Path>) -> io::Result<UnixListener> {
-        crate::mio::UnixListener::bind(path)?.try_into()
+        crate::net::UnixListener::bind(path)?.try_into()
     }
 
     /// Returns the local socket address of this listener.
@@ -214,16 +240,12 @@ impl UnixListener {
     }
 
     fn poll_accept(&self, cx: &mut Context) -> Poll<io::Result<(UnixStream, SocketAddr)>> {
-        let ready = Ready::readable();
-        ready!(self.inner.poll_read_ready(cx, ready))?;
+        let mut guard = ready!(self.inner.poll_read_ready(cx))?;
 
-        match self.inner.get_ref().accept() {
-            Ok((socket, addr)) => Poll::Ready(Ok((socket.try_into()?, addr))),
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                self.inner.clear_read_ready(cx, ready)?;
-                Poll::Pending
-            }
-            Err(e) => Poll::Ready(Err(e)),
+        match guard.try_io(|inner| inner.get_ref().accept()) {
+            Err(_) => Poll::Pending,
+            Ok(Err(e)) => Poll::Ready(Err(e)),
+            Ok(Ok((socket, addr))) => Poll::Ready(Ok((socket.try_into()?, addr))),
         }
     }
 }
@@ -260,12 +282,14 @@ impl Stream for UnixListener {
     }
 }
 
-impl TryFrom<crate::mio::UnixListener> for UnixListener {
+impl TryFrom<crate::net::UnixListener> for UnixListener {
     type Error = io::Error;
 
-    fn try_from(inner: crate::mio::UnixListener) -> io::Result<UnixListener> {
+    fn try_from(inner: crate::net::UnixListener) -> io::Result<UnixListener> {
+        inner.set_nonblocking(true)?;
+
         Ok(UnixListener {
-            inner: PollEvented::new(inner)?,
+            inner: AsyncFd::new(inner)?,
         })
     }
 }
@@ -279,7 +303,7 @@ mod tests {
     use std::os::unix::io::FromRawFd as _;
 
     use tempfile::{tempdir, tempfile};
-    use tokio::prelude::*;
+    use tokio::io::{AsyncWriteExt, AsyncReadExt};
 
     #[tokio::test]
     async fn unix_stream_reads_other_sides_writes() {
