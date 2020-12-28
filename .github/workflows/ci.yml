@@ -19,7 +19,7 @@ jobs:
           - stable
           - beta
           - nightly
-          - 1.39.0
+          - 1.45.0
 
     runs-on: ubuntu-latest
     if: github.actor != 'sbosnick-bot'
@@ -34,13 +34,6 @@ jobs:
           profile: default
           toolchain: ${{ matrix.rust }}
           override: true
-
-      - name: Patch Dependencies
-        if: matrix.rust == '1.39.0'
-        uses: actions-rs/cargo@v1
-        with:
-            command: update
-            args: --package remove_dir_all --precise 0.5.2
 
       - name: Check Format
         if: matrix.rust == 'stable'
