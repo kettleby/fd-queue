@@ -8,25 +8,24 @@
 
 //! An implementation of `EnqueueFd` and `DequeueFd` that is integrated with tokio.
 
-use std:: {
+use std::{
     convert::{TryFrom, TryInto},
     io::{Read, Write},
+    net::Shutdown,
     os::unix::{
         io::{AsRawFd, RawFd},
         net::{SocketAddr, UnixStream as StdUnixStream},
     },
-    net::Shutdown,
     path::Path,
     pin::Pin,
     task::{Context, Poll},
 };
 
-
 use futures_core::stream::Stream;
 use futures_util::{future::poll_fn, ready};
 use pin_project::pin_project;
 use socket2::{Domain, SockAddr, Socket, Type};
-use tokio::io::{self, AsyncRead, AsyncWrite, ReadBuf, unix::AsyncFd};
+use tokio::io::{self, unix::AsyncFd, AsyncRead, AsyncWrite, ReadBuf};
 
 use crate::{DequeueFd, EnqueueFd, QueueFullError};
 
@@ -71,7 +70,9 @@ impl UnixStream {
         }
 
         let stream: UnixStream = socket.into_unix_stream().try_into()?;
-        poll_fn(|cx| stream.inner.poll_write_ready(cx)).await?.retain_ready();
+        poll_fn(|cx| stream.inner.poll_write_ready(cx))
+            .await?
+            .retain_ready();
         Ok(stream)
     }
 
@@ -303,7 +304,7 @@ mod tests {
     use std::os::unix::io::FromRawFd as _;
 
     use tempfile::{tempdir, tempfile};
-    use tokio::io::{AsyncWriteExt, AsyncReadExt};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     #[tokio::test]
     async fn unix_stream_reads_other_sides_writes() {
