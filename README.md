@@ -69,7 +69,7 @@ traits. To include implementations of the traits enable the following features:
 ## Rust Version Requirements
 The library will always support the Rust version that is two earlier
 than the current stable version. The current Minimum Supported Rust
-Version (MSRV) is 1.45.0. Any change to the MSRV will be treated as a
+Version (MSRV) is 1.46.0. Any change to the MSRV will be treated as a
 breaking change for Semantic Version purposes.
 
 ## Semantic Version and Release
