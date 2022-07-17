@@ -19,7 +19,7 @@ jobs:
           - stable
           - beta
           - nightly
-          - 1.46.0
+          - 1.49.0
 
     runs-on: ubuntu-latest
     if: github.actor != 'sbosnick-bot'
