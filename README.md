@@ -6,7 +6,6 @@
 [![doc](https://docs.rs/fd-queue/badge.svg)](https://docs.rs/fd-queue)
 [![Crates.io](https://img.shields.io/crates/v/fd-queue)](https://crates.io/crates/fd-queue)
 [![Release](https://img.shields.io/github/v/release/kettleby/fd-queue?include_prereleases&sort=semver)](https://github.com/kettleby/fd-queue/releases)
-[![semantic-release](https://img.shields.io/badge/%20%20%F0%9F%93%A6%F0%9F%9A%80-semantic--release-e10079.svg)](https://github.com/semantic-release/semantic-release)
 ---
 
 fd-queue provides traits for enqueuing and dequeuing file descriptors and
@@ -77,10 +76,6 @@ This library follows [semantic versioning][semver], but without [Rust's
 modification][rust-semver] to pre-1.0.0 minor version numbers. All
 breaking changes will result in increasing the major version number.
 
-This library also uses [Semantic Release][semrel] for its release process
-which means that it will not have any pre-1.0.0 releases (for the reasons
-described [here][no-pre-1.0.0]).
-
 The first non-pre-release version of the library will be version 1.0.0. This
 does not signal that the library is production ready or that we will attempt
 to avoid breaking changes. It rather signals exactly what the [Semantic Versioning
@@ -90,9 +85,7 @@ changes until version 2.0.0 (see [here][semver-8]).
 For a signal of the maturity of the library see the next heading which will be
 updated as the library matures.
 
-[no-pre-1.0.0]: https://semantic-release.gitbook.io/semantic-release/support/faq#can-i-set-the-initial-release-version-of-my-package-to-0-0-1
 [rust-semver]: https://doc.rust-lang.org/cargo/reference/manifest.html#the-version-field
-[semrel]: https://semantic-release.gitbook.io/semantic-release/
 [semver]: https://semver.org/
 [semver-8]: https://semver.org/#spec-item-8
 
