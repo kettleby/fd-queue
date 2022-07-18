@@ -1,7 +1,7 @@
 name: Release
-on:
-  push:
-    branches:
+  #on:
+  #push:
+  #  branches:
       #- master
       #- alpha
       #- beta
@@ -13,6 +13,7 @@ jobs:
     release:
         name: Semantic Release
         runs-on: ubuntu-latest
+        if: ${{ false }} # disable for now
         if: github.actor != 'sbosnick-bot'
 
         steps:
