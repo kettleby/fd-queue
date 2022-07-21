@@ -1,55 +1,33 @@
 name: Release
-  #on:
-  #push:
-  #  branches:
-      #- master
+  on:
+  push:
+    branches:
+      - master
       #- alpha
       #- beta
+    paths-ignore:
+      - '**.md'
+      - 'flake.*'
+      - '.github/**'
+      - '.gitignore'
 
 env:
   RUST_BACKTRACE: 1
 
 jobs:
     release:
-        name: Semantic Release
+        name: Release-plz
         runs-on: ubuntu-latest
-        if: ${{ false }} # disable for now
-        #if: github.actor != 'sbosnick-bot'
+        #if: ${{ false }} # disable for now
+        if: github.actor != 'sbosnick-bot'
 
         steps:
           - name: Checkout
-            uses: actions/checkout@v2
+            uses: actions/checkout@v3
             with:
                 fetch-depth: 0
-                persist-credentials: false
-
-          - name: Install Rust Stable
-            uses: actions-rs/toolchain@v1
-            with:
-                profile: minimal
-                toolchain: stable
-                override: true
-
-          - name: Install Semantic Release Rust
-            uses: actions-rs/cargo@v1
-            with:
-                command: install
-                args: semantic-release-rust --version 1.0.0-alpha.8
-
-          - name: Stable Test
-            uses: actions-rs/cargo@v1
-            with:
-                command: test
-                args: --all-features
-
-          - name: Semantic Release
-            uses: cycjimmy/semantic-release-action@v2
-            id: semantic
-            with:
-                semantic_version: 17.1.1
-                extra_plugins: |
-                    @semantic-release/exec@5.0
-                    @semantic-release/git@9.0
+          - name: Run release-plz
+            uses: MarcoIeni/release-plz-action@2
             env:
-                GITHUB_TOKEN: ${{ secrets.SEM_REL_GH_TOKEN }}
-                CARGO_REGISTRY_TOKEN: ${{ secrets.SEMREL_CRATES_IO }}
+              GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+              CARGO_REGISTRY_TOKEN: ${{ secrets.FD_QUEUE_CRATES_IO }}
