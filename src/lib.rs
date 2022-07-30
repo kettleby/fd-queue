@@ -18,6 +18,7 @@
 
 #![deny(missing_docs, warnings)]
 
+mod biqueue;
 mod queue;
 
 #[cfg(feature = "net-fd")]
