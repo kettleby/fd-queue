@@ -10,7 +10,6 @@ use std::{
     collections::VecDeque,
     fmt,
     io::{self, prelude::*, Error, ErrorKind, IoSlice, IoSliceMut},
-    iter,
     net::Shutdown,
     os::unix::{
         io::{AsRawFd, FromRawFd, IntoRawFd, RawFd},
@@ -22,6 +21,7 @@ use std::{
 // needed until the MSRV is 1.43 when the associated constant becomes available
 use std::usize;
 
+use biqueue::BiQueue;
 use iomsg::{cmsg_buffer_fds_space, Fd, MsgHdr};
 
 use tracing::{trace, warn};
@@ -76,8 +76,7 @@ mod iomsg;
 #[derive(Debug)]
 pub struct UnixStream {
     inner: StdUnixStream,
-    infd: VecDeque<Fd>,
-    outfd: Option<Vec<RawFd>>,
+    biqueue: BiQueue,
 }
 
 /// A structure representing a Unix domain socket server whose connected sockets
@@ -112,7 +111,7 @@ impl UnixStream {
     /// The size of the bounded queue of outbound [`RawFd`][RawFd].
     ///
     /// [RawFd]: https://doc.rust-lang.org/stable/std/os/unix/io/type.RawFd.html
-    pub const FD_QUEUE_SIZE: usize = 2;
+    pub const FD_QUEUE_SIZE: usize = BiQueue::FD_QUEUE_SIZE;
 
     /// Connects to the socket named by `path`.
     ///
@@ -409,17 +408,12 @@ fn recv_fds(
 /// [RawFd]: https://doc.rust-lang.org/stable/std/os/unix/io/type.RawFd.html
 impl EnqueueFd for UnixStream {
     fn enqueue(&mut self, fd: &impl AsRawFd) -> std::result::Result<(), QueueFullError> {
-        let outfd = self
-            .outfd
-            .get_or_insert_with(|| Vec::with_capacity(Self::FD_QUEUE_SIZE));
-        if outfd.len() >= Self::FD_QUEUE_SIZE {
-            warn!(source = "UnixStream", event = "enqueue", condition = "full");
-            Err(QueueFullError::new())
-        } else {
-            trace!(source = "UnixStream", event = "enqueue", count = 1);
-            outfd.push(fd.as_raw_fd());
-            Ok(())
-        }
+        let result = self.biqueue.enqueue(fd);
+        match result {
+            Ok(_) => trace!(source = "UnixStream", event = "enqueue", count = 1),
+            Err(_) => warn!(source = "UnixStream", event = "enqueue", condition = "full"),
+        };
+        result
     }
 }
 
@@ -432,7 +426,7 @@ impl EnqueueFd for UnixStream {
 /// [RawFd]: https://doc.rust-lang.org/stable/std/os/unix/io/type.RawFd.html
 impl DequeueFd for UnixStream {
     fn dequeue(&mut self) -> Option<RawFd> {
-        let result = self.infd.pop_front();
+        let result = self.biqueue.dequeue();
         trace!(
             source = "UnixStream",
             event = "dequeue",
@@ -459,7 +453,7 @@ impl Read for UnixStream {
     }
 
     fn read_vectored(&mut self, bufs: &mut [IoSliceMut]) -> io::Result<usize> {
-        recv_fds(self.as_raw_fd(), bufs, &mut self.infd)
+        recv_fds(self.as_raw_fd(), bufs, &mut self.biqueue)
     }
 }
 
@@ -475,12 +469,13 @@ impl Write for UnixStream {
     }
 
     fn write_vectored(&mut self, bufs: &[IoSlice]) -> io::Result<usize> {
-        let outfd = self.outfd.take();
+        self.biqueue.write_vectored(self.as_raw_fd(), bufs)
+        // let outfd = self.biqueue.outfd.take();
 
-        match outfd {
-            Some(mut fds) => send_fds(self.as_raw_fd(), bufs, fds.drain(..)),
-            None => send_fds(self.as_raw_fd(), bufs, iter::empty()),
-        }
+        // match outfd {
+        //     Some(mut fds) => send_fds(self.as_raw_fd(), bufs, fds.drain(..)),
+        //     None => send_fds(self.as_raw_fd(), bufs, iter::empty()),
+        // }
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -510,8 +505,7 @@ impl From<StdUnixStream> for UnixStream {
     fn from(inner: StdUnixStream) -> Self {
         Self {
             inner,
-            infd: VecDeque::with_capacity(Self::FD_QUEUE_SIZE),
-            outfd: None,
+            biqueue: BiQueue::new(),
         }
     }
 }
@@ -520,6 +514,73 @@ impl Push<Fd> for VecDeque<Fd> {
     fn push(&mut self, item: Fd) -> Result<(), Fd> {
         self.push_back(item);
         Ok(())
+    }
+}
+
+mod biqueue {
+    use crate::{
+        net::{iomsg::Fd, send_fds, Push},
+        {DequeueFd, EnqueueFd, QueueFullError},
+    };
+
+    use std::{
+        collections::VecDeque,
+        io::{self, IoSlice},
+        iter,
+        os::unix::io::{AsRawFd, IntoRawFd, RawFd},
+    };
+
+    #[derive(Debug)]
+    pub struct BiQueue {
+        infd: VecDeque<Fd>,
+        outfd: Option<Vec<RawFd>>,
+    }
+
+    impl BiQueue {
+        pub const FD_QUEUE_SIZE: usize = 2;
+
+        pub fn new() -> Self {
+            BiQueue {
+                infd: VecDeque::with_capacity(Self::FD_QUEUE_SIZE),
+                outfd: None,
+            }
+        }
+
+        pub fn write_vectored(&mut self, fd: impl AsRawFd, bufs: &[IoSlice]) -> io::Result<usize> {
+            let outfd = self.outfd.take();
+
+            match outfd {
+                Some(mut outfds) => send_fds(fd.as_raw_fd(), bufs, outfds.drain(..)),
+                None => send_fds(fd.as_raw_fd(), bufs, iter::empty()),
+            }
+        }
+    }
+
+    impl DequeueFd for BiQueue {
+        fn dequeue(&mut self) -> Option<RawFd> {
+            self.infd.pop_front().map(|fd| fd.into_raw_fd())
+        }
+    }
+
+    impl Push<Fd> for BiQueue {
+        fn push(&mut self, item: Fd) -> Result<(), Fd> {
+            self.infd.push_back(item);
+            Ok(())
+        }
+    }
+
+    impl EnqueueFd for BiQueue {
+        fn enqueue(&mut self, fd: &impl AsRawFd) -> std::result::Result<(), QueueFullError> {
+            let outfd = self
+                .outfd
+                .get_or_insert_with(|| Vec::with_capacity(Self::FD_QUEUE_SIZE));
+            if outfd.len() >= Self::FD_QUEUE_SIZE {
+                Err(QueueFullError::new())
+            } else {
+                outfd.push(fd.as_raw_fd());
+                Ok(())
+            }
+        }
     }
 }
 
