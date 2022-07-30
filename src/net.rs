@@ -453,7 +453,7 @@ impl Read for UnixStream {
     }
 
     fn read_vectored(&mut self, bufs: &mut [IoSliceMut]) -> io::Result<usize> {
-        recv_fds(self.as_raw_fd(), bufs, &mut self.biqueue)
+        self.biqueue.read_vectored(self.as_raw_fd(), bufs)
     }
 }
 
@@ -513,13 +513,13 @@ impl Push<Fd> for VecDeque<Fd> {
 
 mod biqueue {
     use crate::{
-        net::{iomsg::Fd, send_fds, Push},
+        net::{iomsg::Fd, recv_fds, send_fds, Push},
         {DequeueFd, EnqueueFd, QueueFullError},
     };
 
     use std::{
         collections::VecDeque,
-        io::{self, IoSlice},
+        io::{self, IoSlice, IoSliceMut},
         iter,
         os::unix::io::{AsRawFd, IntoRawFd, RawFd},
     };
@@ -547,6 +547,14 @@ mod biqueue {
                 Some(mut outfds) => send_fds(fd.as_raw_fd(), bufs, outfds.drain(..)),
                 None => send_fds(fd.as_raw_fd(), bufs, iter::empty()),
             }
+        }
+
+        pub fn read_vectored(
+            &mut self,
+            fd: impl AsRawFd,
+            bufs: &mut [IoSliceMut],
+        ) -> io::Result<usize> {
+            recv_fds(fd.as_raw_fd(), bufs, self)
         }
     }
 
