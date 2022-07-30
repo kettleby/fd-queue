@@ -7,9 +7,7 @@
 // except according to those terms
 
 use std::{
-    collections::VecDeque,
-    fmt,
-    io::{self, prelude::*, Error, ErrorKind, IoSlice, IoSliceMut},
+    io::{self, prelude::*, Error, IoSlice, IoSliceMut},
     net::Shutdown,
     os::unix::{
         io::{AsRawFd, FromRawFd, IntoRawFd, RawFd},
@@ -22,7 +20,6 @@ use std::{
 use std::usize;
 
 use biqueue::BiQueue;
-use iomsg::{cmsg_buffer_fds_space, Fd, MsgHdr};
 
 use tracing::{trace, warn};
 
@@ -94,16 +91,6 @@ pub struct UnixListener {
 #[derive(Debug)]
 pub struct Incoming<'a> {
     listener: &'a UnixListener,
-}
-
-#[derive(Debug)]
-struct CMsgTruncatedError {}
-
-#[derive(Debug)]
-struct PushFailureError {}
-
-trait Push<A> {
-    fn push(&mut self, item: A) -> Result<(), A>;
 }
 
 // === impl UnixStream ===
@@ -316,89 +303,6 @@ impl UnixStream {
     }
 }
 
-fn send_fds(
-    sockfd: RawFd,
-    bufs: &[IoSlice],
-    fds: impl Iterator<Item = RawFd>,
-) -> io::Result<usize> {
-    debug_assert_eq!(
-        constants::CMSG_SCM_RIGHTS_SPACE as usize,
-        cmsg_buffer_fds_space(constants::MAX_FD_COUNT)
-    );
-    assert!(UnixStream::FD_QUEUE_SIZE <= constants::MAX_FD_COUNT);
-
-    // Size the buffer to be big enough to hold MAX_FD_COUNT RawFd's.
-    // The assertions above ensure that this is the case. The buffer
-    // must be zeroed because subsequent code will not clear padding
-    // bytes.
-    let mut cmsg_buffer = [0u8; constants::CMSG_SCM_RIGHTS_SPACE as _];
-
-    let counts = MsgHdr::from_io_slice(bufs, &mut cmsg_buffer)
-        .encode_fds(fds)?
-        .send(sockfd)?;
-
-    trace!(
-        source = "UnixStream",
-        event = "write",
-        fds_count = counts.fds_sent(),
-        byte_count = counts.bytes_sent(),
-    );
-
-    Ok(counts.bytes_sent())
-}
-
-fn recv_fds(
-    sockfd: RawFd,
-    bufs: &mut [IoSliceMut],
-    fds_sink: &mut impl Push<Fd>,
-) -> io::Result<usize> {
-    debug_assert_eq!(
-        constants::CMSG_SCM_RIGHTS_SPACE as usize,
-        cmsg_buffer_fds_space(constants::MAX_FD_COUNT)
-    );
-
-    // Size the buffer to be big enough to hold MAX_FD_COUNT RawFd's.
-    // The assertion above ensure that this is the case.
-    let mut cmsg_buffer = [0u8; constants::CMSG_SCM_RIGHTS_SPACE as _];
-
-    let mut recv = MsgHdr::from_io_slice_mut(bufs, &mut cmsg_buffer).recv(sockfd)?;
-
-    let mut fds_count = 0;
-    for fd in recv.take_fds() {
-        match fds_sink.push(fd) {
-            Ok(_) => fds_count += 1,
-            Err(_) => {
-                warn!(
-                    source = "UnixStream",
-                    event = "read",
-                    condition = "too many fds received"
-                );
-
-                return Err(PushFailureError::new());
-            }
-        }
-    }
-
-    if recv.was_control_truncated() {
-        warn!(
-            source = "UnixStream",
-            event = "read",
-            condition = "cmsgs truncated"
-        );
-
-        Err(CMsgTruncatedError::new())
-    } else {
-        trace!(
-            source = "UnixStream",
-            event = "read",
-            fds_count,
-            byte_count = recv.bytes_recvieved(),
-        );
-
-        Ok(recv.bytes_recvieved())
-    }
-}
-
 /// Enqueue a [`RawFd`][RawFd] for later transmission across the `UnixStream`.
 ///
 /// The [`RawFd`][RawFd] will be transmitted on a later call to a method of `Write`.
@@ -504,22 +408,21 @@ impl From<StdUnixStream> for UnixStream {
     }
 }
 
-impl Push<Fd> for VecDeque<Fd> {
-    fn push(&mut self, item: Fd) -> Result<(), Fd> {
-        self.push_back(item);
-        Ok(())
-    }
-}
-
 mod biqueue {
+    use tracing::{trace, warn};
+
     use crate::{
-        net::{iomsg::Fd, recv_fds, send_fds, Push},
+        net::{
+            constants,
+            iomsg::{cmsg_buffer_fds_space, Fd, MsgHdr},
+        },
         {DequeueFd, EnqueueFd, QueueFullError},
     };
 
     use std::{
         collections::VecDeque,
-        io::{self, IoSlice, IoSliceMut},
+        fmt,
+        io::{self, Error, ErrorKind, IoSlice, IoSliceMut},
         iter,
         os::unix::io::{AsRawFd, IntoRawFd, RawFd},
     };
@@ -584,6 +487,135 @@ mod biqueue {
             }
         }
     }
+
+    fn send_fds(
+        sockfd: RawFd,
+        bufs: &[IoSlice],
+        fds: impl Iterator<Item = RawFd>,
+    ) -> io::Result<usize> {
+        debug_assert_eq!(
+            constants::CMSG_SCM_RIGHTS_SPACE as usize,
+            cmsg_buffer_fds_space(constants::MAX_FD_COUNT)
+        );
+        assert!(BiQueue::FD_QUEUE_SIZE <= constants::MAX_FD_COUNT);
+
+        // Size the buffer to be big enough to hold MAX_FD_COUNT RawFd's.
+        // The assertions above ensure that this is the case. The buffer
+        // must be zeroed because subsequent code will not clear padding
+        // bytes.
+        let mut cmsg_buffer = [0u8; constants::CMSG_SCM_RIGHTS_SPACE as _];
+
+        let counts = MsgHdr::from_io_slice(bufs, &mut cmsg_buffer)
+            .encode_fds(fds)?
+            .send(sockfd)?;
+
+        trace!(
+            source = "UnixStream",
+            event = "write",
+            fds_count = counts.fds_sent(),
+            byte_count = counts.bytes_sent(),
+        );
+
+        Ok(counts.bytes_sent())
+    }
+
+    fn recv_fds(
+        sockfd: RawFd,
+        bufs: &mut [IoSliceMut],
+        fds_sink: &mut impl Push<Fd>,
+    ) -> io::Result<usize> {
+        debug_assert_eq!(
+            constants::CMSG_SCM_RIGHTS_SPACE as usize,
+            cmsg_buffer_fds_space(constants::MAX_FD_COUNT)
+        );
+
+        // Size the buffer to be big enough to hold MAX_FD_COUNT RawFd's.
+        // The assertion above ensure that this is the case.
+        let mut cmsg_buffer = [0u8; constants::CMSG_SCM_RIGHTS_SPACE as _];
+
+        let mut recv = MsgHdr::from_io_slice_mut(bufs, &mut cmsg_buffer).recv(sockfd)?;
+
+        let mut fds_count = 0;
+        for fd in recv.take_fds() {
+            match fds_sink.push(fd) {
+                Ok(_) => fds_count += 1,
+                Err(_) => {
+                    warn!(
+                        source = "UnixStream",
+                        event = "read",
+                        condition = "too many fds received"
+                    );
+
+                    return Err(PushFailureError::new());
+                }
+            }
+        }
+
+        if recv.was_control_truncated() {
+            warn!(
+                source = "UnixStream",
+                event = "read",
+                condition = "cmsgs truncated"
+            );
+
+            Err(CMsgTruncatedError::new())
+        } else {
+            trace!(
+                source = "UnixStream",
+                event = "read",
+                fds_count,
+                byte_count = recv.bytes_recvieved(),
+            );
+
+            Ok(recv.bytes_recvieved())
+        }
+    }
+
+    #[derive(Debug)]
+    struct CMsgTruncatedError {}
+
+    #[derive(Debug)]
+    struct PushFailureError {}
+
+    trait Push<A> {
+        fn push(&mut self, item: A) -> Result<(), A>;
+    }
+
+    // === impl CMsgTruncatedError ===
+    impl CMsgTruncatedError {
+        fn new() -> Error {
+            Error::new(ErrorKind::Other, CMsgTruncatedError {})
+        }
+    }
+
+    impl fmt::Display for CMsgTruncatedError {
+        fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
+            write!(
+                f,
+                "The buffer used to receive file descriptors was too small."
+            )
+        }
+    }
+
+    impl std::error::Error for CMsgTruncatedError {}
+
+    // === impl PushFailureError ===
+    impl PushFailureError {
+        fn new() -> Error {
+            Error::new(ErrorKind::Other, PushFailureError {})
+        }
+    }
+
+    impl fmt::Display for PushFailureError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(
+                f,
+                "The sink for receiving file descriptors was unexpectedly full."
+            )
+        }
+    }
+
+    impl std::error::Error for PushFailureError {}
 }
 
 // === impl UnixListener ===
@@ -823,42 +855,6 @@ impl Iterator for Incoming<'_> {
         (usize::MAX, None)
     }
 }
-
-// === impl CMsgTruncatedError ===
-impl CMsgTruncatedError {
-    fn new() -> Error {
-        Error::new(ErrorKind::Other, CMsgTruncatedError {})
-    }
-}
-
-impl fmt::Display for CMsgTruncatedError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(
-            f,
-            "The buffer used to receive file descriptors was too small."
-        )
-    }
-}
-
-impl std::error::Error for CMsgTruncatedError {}
-
-// === impl PushFailureError ===
-impl PushFailureError {
-    fn new() -> Error {
-        Error::new(ErrorKind::Other, PushFailureError {})
-    }
-}
-
-impl fmt::Display for PushFailureError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "The sink for receiving file descriptors was unexpectedly full."
-        )
-    }
-}
-
-impl std::error::Error for PushFailureError {}
 
 // === precomputed constants generated by build.rs ===
 mod constants {
