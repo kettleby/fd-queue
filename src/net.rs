@@ -470,12 +470,6 @@ impl Write for UnixStream {
 
     fn write_vectored(&mut self, bufs: &[IoSlice]) -> io::Result<usize> {
         self.biqueue.write_vectored(self.as_raw_fd(), bufs)
-        // let outfd = self.biqueue.outfd.take();
-
-        // match outfd {
-        //     Some(mut fds) => send_fds(self.as_raw_fd(), bufs, fds.drain(..)),
-        //     None => send_fds(self.as_raw_fd(), bufs, iter::empty()),
-        // }
     }
 
     fn flush(&mut self) -> io::Result<()> {
