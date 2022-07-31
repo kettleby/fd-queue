@@ -6,6 +6,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms
 
+//! Bi-directional fd queue with the ability to ability to pass the fd's over
+//! a provided unix stream fd.
+
 use std::{
     collections::VecDeque,
     fmt,
@@ -14,18 +17,36 @@ use std::{
     os::unix::io::{AsRawFd, IntoRawFd, RawFd},
 };
 
-use tracing::{trace, warn};
+use ::tracing::{trace, warn};
 
 use crate::{DequeueFd, EnqueueFd, QueueFullError};
 use iomsg::{cmsg_buffer_fds_space, Fd, MsgHdr};
 
 mod iomsg;
 
+/// The Bi-directional queue for fd passing.
+///
+/// A `BiQueue` consists of an inbound fd queue and an outboud fd queue that
+/// will pass the queued fd's over a unix stream in the [`BiQueue::write_vectored`]
+/// and [`BiQueue::read_vectored`] methods. The inbound and outboud queues are accessed
+/// through the [`EnqueueFd`] and [`DequeueFd`] trait impl's.
 #[derive(Debug)]
 pub struct BiQueue {
     infd: VecDeque<Fd>,
     outfd: Option<Vec<RawFd>>,
 }
+
+#[derive(Debug)]
+struct CMsgTruncatedError {}
+
+#[derive(Debug)]
+struct PushFailureError {}
+
+trait Push<A> {
+    fn push(&mut self, item: A) -> Result<(), A>;
+}
+
+// === impl Biqueue ===
 
 impl BiQueue {
     pub const FD_QUEUE_SIZE: usize = 2;
@@ -81,6 +102,8 @@ impl EnqueueFd for BiQueue {
         }
     }
 }
+
+// === helper functions ===
 
 fn send_fds(
     sockfd: RawFd,
@@ -163,16 +186,6 @@ fn recv_fds(
 
         Ok(recv.bytes_recvieved())
     }
-}
-
-#[derive(Debug)]
-struct CMsgTruncatedError {}
-
-#[derive(Debug)]
-struct PushFailureError {}
-
-trait Push<A> {
-    fn push(&mut self, item: A) -> Result<(), A>;
 }
 
 // === impl CMsgTruncatedError ===
