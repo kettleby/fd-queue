@@ -48,6 +48,24 @@ jobs:
         with:
             token: ${{ secrets.GITHUB_TOKEN }}
 
+      - name: Check net-fd
+        uses: actions-rs/cargo@v1
+        with:
+          command: check
+          args: --features net-fd
+
+      - name: Check mio-fd
+        uses: actions-rs/cargo@v1
+        with:
+          command: check
+          args: --features mio-fd
+
+      - name: Check tokio-fd
+        uses: actions-rs/cargo@v1
+        with:
+          command: check
+          args: --features tokio-fd
+
       - name: Test
         uses: actions-rs/cargo@v1
         with:
