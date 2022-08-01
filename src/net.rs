@@ -592,12 +592,6 @@ impl UnixListener {
     pub fn incoming(&self) -> Incoming {
         Incoming { listener: self }
     }
-
-    // TODO: remove method when tokio::UnixStream no longer relies on net::UnixStream
-    #[cfg(feature = "tokio-fd")]
-    pub(crate) fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
-        self.inner.set_nonblocking(nonblocking)
-    }
 }
 
 impl AsRawFd for UnixListener {

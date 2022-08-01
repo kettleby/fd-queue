@@ -13,7 +13,7 @@ categories = ["asynchronous", "os::unix-apis"]
 [features]
 net-fd = ["tracing"]
 mio-fd = ["net-fd", "mio"]
-tokio-fd = ["net-fd", "tokio", "socket2", "pin-project", "futures-core", "futures-util"]
+tokio-fd = ["tracing", "tokio", "socket2", "pin-project", "futures-core", "futures-util"]
 
 [dependencies]
 tracing = {version = "0.1.15", optional = true}

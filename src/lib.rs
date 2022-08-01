@@ -20,7 +20,7 @@
 
 mod queue;
 
-#[cfg(feature = "net-fd")]
+#[cfg(any(feature = "net-fd", feature = "tokio-fd"))]
 mod biqueue;
 
 #[cfg(feature = "net-fd")]
