@@ -78,7 +78,15 @@ impl BiQueue {
 
 impl DequeueFd for BiQueue {
     fn dequeue(&mut self) -> Option<RawFd> {
-        self.infd.pop_front().map(|fd| fd.into_raw_fd())
+        let result = self.infd.pop_front().map(|fd| fd.into_raw_fd());
+
+        trace!(
+            source = "UnixStream",
+            event = "dequeue",
+            count = if result.is_some() { 1 } else { 0 }
+        );
+
+        result
     }
 }
 
@@ -95,9 +103,11 @@ impl EnqueueFd for BiQueue {
             .outfd
             .get_or_insert_with(|| Vec::with_capacity(Self::FD_QUEUE_SIZE));
         if outfd.len() >= Self::FD_QUEUE_SIZE {
+            warn!(source = "UnixStream", event = "enqueue", condition = "full");
             Err(QueueFullError::new())
         } else {
             outfd.push(fd.as_raw_fd());
+            trace!(source = "UnixStream", event = "enqueue", count = 1);
             Ok(())
         }
     }

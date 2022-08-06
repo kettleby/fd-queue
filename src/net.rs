@@ -21,8 +21,6 @@ use std::usize;
 
 use crate::biqueue::BiQueue;
 
-use tracing::{trace, warn};
-
 use crate::{DequeueFd, EnqueueFd, QueueFullError};
 
 /// A structure representing a connected Unix socket with support for passing
@@ -310,12 +308,7 @@ impl UnixStream {
 /// [RawFd]: https://doc.rust-lang.org/stable/std/os/unix/io/type.RawFd.html
 impl EnqueueFd for UnixStream {
     fn enqueue(&mut self, fd: &impl AsRawFd) -> std::result::Result<(), QueueFullError> {
-        let result = self.biqueue.enqueue(fd);
-        match result {
-            Ok(_) => trace!(source = "UnixStream", event = "enqueue", count = 1),
-            Err(_) => warn!(source = "UnixStream", event = "enqueue", condition = "full"),
-        };
-        result
+        self.biqueue.enqueue(fd)
     }
 }
 
@@ -328,13 +321,7 @@ impl EnqueueFd for UnixStream {
 /// [RawFd]: https://doc.rust-lang.org/stable/std/os/unix/io/type.RawFd.html
 impl DequeueFd for UnixStream {
     fn dequeue(&mut self) -> Option<RawFd> {
-        let result = self.biqueue.dequeue();
-        trace!(
-            source = "UnixStream",
-            event = "dequeue",
-            count = if result.is_some() { 1 } else { 0 }
-        );
-        result.map(|fd| fd.into_raw_fd())
+        self.biqueue.dequeue()
     }
 }
 
