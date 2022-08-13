@@ -6,7 +6,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms
 
-//! An implementation of `EnqueueFd` and `DequeueFd` that is integrated with tokio.
+//! An implementation of [`EnqueueFd`] and [`DequeueFd`] that is integrated with tokio.
 
 use std::{
     convert::TryFrom,
@@ -101,6 +101,36 @@ pub struct UnixStream {
 /// listener in places that want a stream. The stream will never return None and
 /// will also not yield the peer's SocketAddr structure. Iterating over it is
 /// equivalent to calling accept in a loop.
+///
+/// # Examples
+///
+/// ```
+/// # use tempfile::tempdir;
+/// use fd_queue::tokio::{UnixStream, UnixListener};
+/// use futures_util::stream::StreamExt;
+/// use tokio::io::{AsyncReadExt, AsyncWriteExt};
+///
+/// # tokio_test::block_on(async {
+/// # let dir = tempdir()?;
+/// # let path = dir.path().join("mysock");
+/// // let path: Path = ...
+/// let mut listener = UnixListener::bind(&path)?;
+///
+/// tokio::spawn(async move {
+///     let mut sock1 = UnixStream::connect(path).await?;
+///     sock1.write(b"Hello World!").await?;
+/// #   Ok::<(), std::io::Error>(())
+/// });
+///
+/// let mut sock2 = listener.next().await.expect("Listener stream unexpectedly empty")?;
+///
+/// let mut buf = [0u8; 256];
+/// sock2.read(&mut buf).await?;
+///
+/// assert!(buf.starts_with(b"Hello World!"));
+/// #
+/// # Ok::<(), std::io::Error>(())
+/// # });
 #[derive(Debug)]
 pub struct UnixListener {
     inner: TokioUnixListener,
@@ -398,16 +428,75 @@ impl UnixListener {
     /// The runtime is usually set implicitly when this function is called from a
     /// future driven by a tokio runtime, otherwise runtime can be set explicitly
     /// with `Handle::enter` function.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use tempfile::tempdir;
+    /// use fd_queue::tokio::UnixListener;
+    ///
+    /// # tokio_test::block_on(async {
+    /// # let dir = tempdir()?;
+    /// # let path = dir.path().join("mysock");
+    /// // let path: Path = ...
+    /// let listener = UnixListener::bind(&path)?;
+    /// #
+    /// # Ok::<(), std::io::Error>(())
+    /// # });
     pub fn bind(path: impl AsRef<Path>) -> io::Result<UnixListener> {
         TokioUnixListener::bind(path).map(|l| l.into())
     }
 
     /// Returns the local socket address of this listener.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use tempfile::tempdir;
+    /// use fd_queue::tokio::UnixListener;
+    ///
+    /// # tokio_test::block_on(async {
+    /// # let dir = tempdir()?;
+    /// # let path = dir.path().join("mysock");
+    /// // let path: Path = ...
+    /// let listener = UnixListener::bind(&path)?;
+    ///
+    /// let addr = listener.local_addr()?;
+    ///
+    /// match addr.as_pathname() {
+    ///     Some(path) => println!("The local address is {}.", path.display()),
+    ///     None => println!("The local address does not have a pathname"),
+    /// }
+    /// #
+    /// # Ok::<(), std::io::Error>(())
+    /// # });
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         to_addr(self.inner.local_addr()?)
     }
 
     /// Returns the value of the `SO_ERROR` option.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use tempfile::tempdir;
+    /// use fd_queue::tokio::UnixListener;
+    ///
+    /// # tokio_test::block_on(async {
+    /// # let dir = tempdir()?;
+    /// # let path = dir.path().join("mysock");
+    /// // let path: Path = ...
+    /// let listener = UnixListener::bind(&path)?;
+    ///
+    /// let so_error = listener.take_error()?;
+    ///
+    /// match so_error {
+    ///     Some(err) => println!("The SO_ERROR was {}.", err),
+    ///     None => println!("There was no SO_ERROR."),
+    /// }
+    /// #
+    /// # Ok::<(), std::io::Error>(())
+    /// # });
     pub fn take_error(&self) -> io::Result<Option<io::Error>> {
         self.inner.take_error()
     }
@@ -421,6 +510,25 @@ impl UnixListener {
     /// The runtime is usually set implicitly when this function is called from a
     /// future driven by a tokio runtime, otherwise runtime can be set explicitly
     /// with `Handle::enter` function.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use tempfile::tempdir;
+    /// # use fd_queue::tokio::UnixStream;
+    /// use fd_queue::tokio::UnixListener;
+    ///
+    /// # tokio_test::block_on(async {
+    /// # let dir = tempdir()?;
+    /// # let path = dir.path().join("mysock");
+    /// // let path: Path = ...
+    /// let mut listener = UnixListener::bind(&path)?;
+    /// # tokio::spawn(async move { UnixStream::connect(path).await });
+    ///
+    /// let (sock, addr) = listener.accept().await?;
+    /// #
+    /// # Ok::<(), std::io::Error>(())
+    /// # });
     pub async fn accept(&mut self) -> io::Result<(UnixStream, SocketAddr)> {
         self.inner
             .accept()
@@ -453,6 +561,26 @@ impl AsRawFd for UnixListener {
 /// The runtime is usually set implicitly when this function is called from a
 /// future driven by a tokio runtime, otherwise runtime can be set explicitly
 /// with `Handle::enter` function.
+///
+/// # Examples
+///
+/// ```
+/// # use tempfile::tempdir;
+/// # use fd_queue::tokio::UnixStream;
+/// use fd_queue::tokio::UnixListener;
+/// use futures_util::stream::StreamExt;
+///
+/// # tokio_test::block_on(async {
+/// # let dir = tempdir()?;
+/// # let path = dir.path().join("mysock");
+/// // let path: Path = ...
+/// let mut listener = UnixListener::bind(&path)?;
+/// # tokio::spawn(async move { UnixStream::connect(path).await });
+///
+/// let sock = listener.next().await.expect("Listener stream unexpectedly empty");
+/// #
+/// # Ok::<(), std::io::Error>(())
+/// # });
 impl Stream for UnixListener {
     type Item = io::Result<UnixStream>;
 
