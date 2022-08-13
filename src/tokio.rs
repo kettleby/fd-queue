@@ -35,11 +35,57 @@ use tokio::{
 
 use crate::{biqueue::BiQueue, DequeueFd, EnqueueFd, QueueFullError};
 
-/// A structure representing a connected Unix socket.
+/// A structure representing a connected Unix socket with support for passing
+/// [`RawFd`].
 ///
-/// This socket can be connected directly with UnixStream::connect or accepted from a listener with
-/// UnixListener::incoming. Additionally, a pair of anonymous Unix sockets can be created with
-/// UnixStream::pair.
+/// This is the implementation of [`EnqueueFd`] and [`DequeueFd`] that is based
+/// on `tokio` [`UnixStream`][TokioUnixStream]. Conceptually the key interfaces
+/// on `UnixStream` interact as shown in the following diagram:
+///
+/// ```text
+/// EnqueueFd => AsyncWrite => AsyncRead => DequeueFd
+/// ```
+///
+/// That is, you first enqueue a [`RawFd`] to the `UnixStream` and then
+/// [`AsyncWrite`] at least one byte. On the other side  of the `UnixStream` you
+/// then [`AsyncRead`] at least one byte and then dequeue the [`RawFd`].
+///
+/// This socket can be connected directly with [`UnixStream::connect`] or accepted
+/// from a listener with [`UnixListener::accept`]. Additionally, a pair of
+/// anonymous Unix sockets can be created with [`UnixStream::pair`].
+///
+/// # Examples
+///
+/// ```
+/// # use fd_queue::{EnqueueFd, DequeueFd, tokio::UnixStream};
+/// # use std::io::prelude::*;
+/// # use std::os::unix::io::FromRawFd;
+/// # use tempfile::tempfile;
+/// use tokio::io::{AsyncReadExt, AsyncWriteExt};
+/// use std::fs::File;
+///
+/// # tokio_test::block_on(async {
+/// #
+/// let (mut sock1, mut sock2) = UnixStream::pair()?;
+///
+/// // sender side
+/// # let file1: File = tempfile()?;
+/// // let file1: File = ...
+/// sock1.enqueue(&file1).expect("Can't enqueue the file descriptor.");
+/// sock1.write(b"a").await?;
+/// sock1.flush().await?;
+///
+/// // receiver side
+/// let mut buf = [0u8; 1];
+/// sock2.read(&mut buf).await?;
+/// let fd = sock2.dequeue().expect("Can't dequeue the file descriptor.");
+/// let file2 = unsafe { File::from_raw_fd(fd) };
+/// #
+/// # Ok::<(), std::io::Error>(())
+/// #
+/// # });
+/// # Ok::<(), std::io::Error>(())
+/// ```
 #[pin_project]
 #[derive(Debug)]
 pub struct UnixStream {
@@ -50,10 +96,11 @@ pub struct UnixStream {
 
 /// A Unix socket which can accept connections from other Unix sockets.
 ///
-/// You can accept a new connection by using the accept method. Alternatively UnixListener
-/// implements the Stream trait, which allows you to use the listener in places that want a stream.
-/// The stream will never return None and will also not yield the peer's SocketAddr structure.
-/// Iterating over it is equivalent to calling accept in a loop.
+/// You can accept a new connection by using the accept method. Alternatively
+/// UnixListener implements the Stream trait, which allows you to use the
+/// listener in places that want a stream. The stream will never return None and
+/// will also not yield the peer's SocketAddr structure. Iterating over it is
+/// equivalent to calling accept in a loop.
 #[derive(Debug)]
 pub struct UnixListener {
     inner: TokioUnixListener,
@@ -66,6 +113,25 @@ impl UnixStream {
     ///
     /// This function will create a new socket and connect the the path specifed,
     /// associating the returned stream with the default event loop's handle.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use tempfile::tempdir;
+    /// # use fd_queue::tokio::UnixListener;
+    /// use fd_queue::tokio::UnixStream;
+    /// # tokio_test::block_on(async {
+    /// # let dir = tempdir()?;
+    /// # let path = dir.path().join("mysock");
+    /// // let path: Path = ...
+    /// # let mut listener = UnixListener::bind(&path)?;
+    /// # tokio::spawn(async move { listener.accept().await.expect("Can't accept")});
+    ///
+    /// UnixStream::connect(path).await?;
+    /// #
+    /// # Ok::<(), std::io::Error>(())
+    /// # });
+    /// ```
     pub async fn connect(path: impl AsRef<Path>) -> io::Result<UnixStream> {
         TokioUnixStream::connect(path).await.map(|s| s.into())
     }
@@ -75,21 +141,108 @@ impl UnixStream {
     /// This function will create an unnamed pair of interconnected Unix sockets for
     /// communicating back and forth between one another. Each socket will be
     /// associted with the default event loop's handle.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use fd_queue::tokio::UnixStream;
+    ///
+    /// # tokio_test::block_on(async {
+    /// let (sock1, sock2) = UnixStream::pair()?;
+    /// # Ok::<(), std::io::Error>(())
+    /// # });
+    /// ```
     pub fn pair() -> io::Result<(UnixStream, UnixStream)> {
         TokioUnixStream::pair().map(|(s1, s2)| (s1.into(), s2.into()))
     }
 
     /// Returns the socket address of the local half of this connection.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use tempfile::tempdir;
+    /// # use fd_queue::tokio::UnixListener;
+    /// use fd_queue::tokio::UnixStream;
+    ///
+    /// # tokio_test::block_on(async {
+    /// # let dir = tempdir()?;
+    /// # let path = dir.path().join("mysock");
+    /// // let path: Path = ...
+    /// # let mut listener = UnixListener::bind(&path)?;
+    /// # tokio::spawn(async move { listener.accept().await.expect("Can't accept")});
+    ///
+    /// let sock = UnixStream::connect(path).await?;
+    ///
+    /// sock.local_addr()?;
+    /// #
+    /// # Ok::<(), std::io::Error>(())
+    /// # });
+    /// ```
     pub fn local_addr(&self) -> io::Result<SocketAddr> {
         to_addr(self.inner.local_addr()?)
     }
 
     /// Returns the socket address of the remote half of this conneciton.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use tempfile::tempdir;
+    /// # use fd_queue::tokio::UnixListener;
+    /// use fd_queue::tokio::UnixStream;
+    ///
+    /// # tokio_test::block_on(async {
+    /// # let dir = tempdir()?;
+    /// # let path = dir.path().join("mysock");
+    /// // let path: Path = ...
+    /// # let mut listener = UnixListener::bind(&path)?;
+    /// # tokio::spawn(async move { listener.accept().await.expect("Can't accept")});
+    ///
+    /// let sock = UnixStream::connect(path).await?;
+    ///
+    /// sock.peer_addr()?;
+    /// #
+    /// # Ok::<(), std::io::Error>(())
+    /// # });
+    /// ```
     pub fn peer_addr(&self) -> io::Result<SocketAddr> {
         to_addr(self.inner.peer_addr()?)
     }
 
     /// Returns the value of the SO_ERROR option.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use tempfile::tempdir;
+    /// # use fd_queue::tokio::UnixListener;
+    /// use fd_queue::tokio::UnixStream;
+    ///
+    /// # tokio_test::block_on(async {
+    /// # let dir = tempdir()?;
+    /// # let path = dir.path().join("mysock");
+    /// // let path: Path = ...
+    /// # let mut listener = UnixListener::bind(&path)?;
+    /// # tokio::spawn(async move { listener.accept().await.expect("Can't accept")});
+    ///
+    /// let sock = UnixStream::connect(path).await?;
+    ///
+    /// let err = match sock.take_error() {
+    ///     Ok(Some(err)) => err,
+    ///     Ok(None) => {
+    ///         println!("No error found.");
+    ///         return Ok(());
+    ///     }
+    ///     Err(e) => {
+    ///         println!("Couldn't take the SO_ERROR option: {}", e);
+    ///         return Ok(());
+    ///     }
+    /// };
+    /// #
+    /// # Ok::<(), std::io::Error>(())
+    /// # });
+    /// ```
     pub fn take_error(&self) -> io::Result<Option<io::Error>> {
         self.inner.take_error()
     }
@@ -99,6 +252,28 @@ impl UnixStream {
     /// This function will cause all pending and future I/O calls on the specified
     /// portions to immediately return with an appropriate value (see the
     /// documentation of `Shutdown`).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use std::net::Shutdown;
+    /// use tokio::io::AsyncReadExt;
+    /// use fd_queue::tokio::UnixStream;
+    ///
+    /// # tokio_test::block_on(async {
+    /// let (mut sock, _) = UnixStream::pair()?;
+    ///
+    /// sock.shutdown(Shutdown::Read)?;
+    ///
+    /// let mut buf = [0u8; 256];
+    /// match sock.read(&mut buf).await {
+    ///     Ok(0) => {},
+    ///     _ => panic!("Read unexpectedly not shut down."),
+    /// }
+    /// #
+    /// # Ok::<(), std::io::Error>(())
+    /// # });
+    /// ```
     pub fn shutdown(&self, how: Shutdown) -> io::Result<()> {
         shutdown(self, how)
     }
