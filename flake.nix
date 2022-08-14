@@ -26,6 +26,7 @@
           pkgs.rust-apps.release-plz
           pkgs.cargo-edit
           pkgs.cargo-outdated
+          pkgs.cargo-audit
         ];
      };
     });
