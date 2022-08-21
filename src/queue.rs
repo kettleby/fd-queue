@@ -11,18 +11,18 @@ use std::fmt::{self, Display};
 use std::marker::PhantomData;
 use std::os::unix::io::{AsRawFd, RawFd};
 
-/// An interface to enqueue a [`RawFd`][RawFd] for later tranmission to a different
+/// An interface to enqueue a [`RawFd`][RawFd] for later transmission to a different
 /// process.
 ///
 /// This trait is intended to interact with [`Write`][Write] as the mechanism for
-/// actually transmitting the enqueued [`RawFd`][RawFd]. Specfically, the `RawFd`
-/// will be transmittied after a `write()` of at least 1 byte and, possibly, a
+/// actually transmitting the enqueued [`RawFd`][RawFd]. Specifically, the `RawFd`
+/// will be transmitted after a `write()` of at least 1 byte and, possibly, a
 /// `flush()`.
 ///
 /// [RawFd]: https://doc.rust-lang.org/stable/std/os/unix/io/type.RawFd.html
 /// [Write]: https://doc.rust-lang.org/stable/std/io/trait.Write.html
 pub trait EnqueueFd {
-    /// Enqueue `fd` for later tranmission to a different process.
+    /// Enqueue `fd` for later transmission to a different process.
     ///
     /// The caller is responsible for keeping `fd` open until after the `write()` and
     /// `flush()` calls for actually transmitting the `fd` have been completed.
@@ -33,14 +33,14 @@ pub trait EnqueueFd {
 /// different process.
 ///
 /// This trait is intended to interact with [`Read`][Read] as the mechanism for
-/// actually tranmitting the [`RawFd`][RawFd] before it can be dequeued. Specfically
+/// actually transmitting the [`RawFd`][RawFd] before it can be dequeued. Specifically
 /// the `RawFd` will become available for dequeuing after at least 1 byte has been
 /// `read()`.
 ///
 /// [RawFd]: https://doc.rust-lang.org/stable/std/os/unix/io/type.RawFd.html
 /// [Read]: https://doc.rust-lang.org/stable/std/io/trait.Read.html
 pub trait DequeueFd {
-    /// Dequeue a previouly transmitted [`RawFd`][RawFd].
+    /// Dequeue a previously transmitted [`RawFd`][RawFd].
     ///
     /// The caller is responsible for closing this `RawFd`.
     ///

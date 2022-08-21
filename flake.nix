@@ -27,6 +27,7 @@
           pkgs.cargo-edit
           pkgs.cargo-outdated
           pkgs.cargo-audit
+          pkgs.cargo-spellcheck
         ];
      };
     });

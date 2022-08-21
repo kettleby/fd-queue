@@ -184,7 +184,7 @@ impl UnixListener {
         StdUnixListner::bind(path)?.try_into()
     }
 
-    /// Accepts a new incoming conneciton to this listener.
+    /// Accepts a new incoming connection to this listener.
     ///
     /// The returned stream will be set to non-blocking mode.
     pub fn accept(&self) -> io::Result<(UnixStream, SocketAddr)> {

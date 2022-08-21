@@ -6,7 +6,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms
 
-//! A library for provinding abstractions for passing [`RawFd`][RawFd] between
+//! A library for providing abstractions for passing [`RawFd`][RawFd] between
 //! processes. This is necessarily a Unix (or Unix-like) library as `RawFd` are Unix
 //! specific.
 //!

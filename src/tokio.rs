@@ -141,7 +141,7 @@ pub struct UnixListener {
 impl UnixStream {
     /// Connects to the socket named by path.
     ///
-    /// This function will create a new socket and connect the the path specifed,
+    /// This function will create a new socket and connect the the path specified,
     /// associating the returned stream with the default event loop's handle.
     ///
     /// # Examples
@@ -166,11 +166,11 @@ impl UnixStream {
         TokioUnixStream::connect(path).await.map(|s| s.into())
     }
 
-    /// Creates an unnamed pair of conntected sockets.
+    /// Creates an unnamed pair of connected sockets.
     ///
     /// This function will create an unnamed pair of interconnected Unix sockets for
     /// communicating back and forth between one another. Each socket will be
-    /// associted with the default event loop's handle.
+    /// associated with the default event loop's handle.
     ///
     /// # Examples
     ///
@@ -213,7 +213,7 @@ impl UnixStream {
         to_addr(self.inner.local_addr()?)
     }
 
-    /// Returns the socket address of the remote half of this conneciton.
+    /// Returns the socket address of the remote half of this connection.
     ///
     /// # Examples
     ///
