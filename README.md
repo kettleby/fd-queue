@@ -72,9 +72,7 @@ Version (MSRV) is 1.61.0. Any change to the MSRV will be treated as a
 minor change for Semantic Version purposes.
 
 ## Semantic Version and Release
-This library follows [semantic versioning][semver], but without [Rust's
-modification][rust-semver] to pre-1.0.0 minor version numbers. All
-breaking changes will result in increasing the major version number.
+This library follows [semantic versioning][semver].
 
 The first non-pre-release version of the library will be version 1.0.0. This
 does not signal that the library is production ready or that we will attempt
@@ -85,7 +83,6 @@ changes until version 2.0.0 (see [here][semver-8]).
 For a signal of the maturity of the library see the next heading which will be
 updated as the library matures.
 
-[rust-semver]: https://doc.rust-lang.org/cargo/reference/manifest.html#the-version-field
 [semver]: https://semver.org/
 [semver-8]: https://semver.org/#spec-item-8
 
