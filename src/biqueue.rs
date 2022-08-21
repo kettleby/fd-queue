@@ -26,9 +26,9 @@ mod iomsg;
 
 /// The Bi-directional queue for fd passing.
 ///
-/// A `BiQueue` consists of an inbound fd queue and an outboud fd queue that
+/// A `BiQueue` consists of an inbound fd queue and an outbound fd queue that
 /// will pass the queued fd's over a unix stream in the [`BiQueue::write_vectored`]
-/// and [`BiQueue::read_vectored`] methods. The inbound and outboud queues are accessed
+/// and [`BiQueue::read_vectored`] methods. The inbound and outbound queues are accessed
 /// through the [`EnqueueFd`] and [`DequeueFd`] trait impl's.
 #[derive(Debug)]
 pub struct BiQueue {

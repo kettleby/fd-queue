@@ -34,7 +34,7 @@ use crate::{DequeueFd, EnqueueFd, QueueFullError};
 /// EnqueueFd => Write => Read => DequeueFd
 /// ```
 ///
-/// That is, you first endqueue a [`RawFd`][RawFd] to the `UnixStream` and then
+/// That is, you first enqueue a [`RawFd`][RawFd] to the `UnixStream` and then
 /// `Write` at least one byte. On the other side of the `UnixStream` you then `Read`
 /// at least one byte and then dequeue the [`RawFd`][RawFd].
 ///
