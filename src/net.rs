@@ -7,10 +7,7 @@
 // except according to those terms
 
 use std::{
-    collections::VecDeque,
-    fmt,
-    io::{self, prelude::*, Error, ErrorKind, IoSlice, IoSliceMut},
-    iter,
+    io::{self, prelude::*, Error, IoSlice, IoSliceMut},
     net::Shutdown,
     os::unix::{
         io::{AsRawFd, FromRawFd, IntoRawFd, RawFd},
@@ -22,13 +19,9 @@ use std::{
 // needed until the MSRV is 1.43 when the associated constant becomes available
 use std::usize;
 
-use iomsg::{cmsg_buffer_fds_space, Fd, MsgHdr};
-
-use tracing::{trace, warn};
+use crate::biqueue::BiQueue;
 
 use crate::{DequeueFd, EnqueueFd, QueueFullError};
-
-mod iomsg;
 
 /// A structure representing a connected Unix socket with support for passing
 /// [`RawFd`][RawFd].
@@ -76,8 +69,7 @@ mod iomsg;
 #[derive(Debug)]
 pub struct UnixStream {
     inner: StdUnixStream,
-    infd: VecDeque<Fd>,
-    outfd: Option<Vec<RawFd>>,
+    biqueue: BiQueue,
 }
 
 /// A structure representing a Unix domain socket server whose connected sockets
@@ -97,22 +89,12 @@ pub struct Incoming<'a> {
     listener: &'a UnixListener,
 }
 
-#[derive(Debug)]
-struct CMsgTruncatedError {}
-
-#[derive(Debug)]
-struct PushFailureError {}
-
-trait Push<A> {
-    fn push(&mut self, item: A) -> Result<(), A>;
-}
-
 // === impl UnixStream ===
 impl UnixStream {
     /// The size of the bounded queue of outbound [`RawFd`][RawFd].
     ///
     /// [RawFd]: https://doc.rust-lang.org/stable/std/os/unix/io/type.RawFd.html
-    pub const FD_QUEUE_SIZE: usize = 2;
+    pub const FD_QUEUE_SIZE: usize = BiQueue::FD_QUEUE_SIZE;
 
     /// Connects to the socket named by `path`.
     ///
@@ -317,89 +299,6 @@ impl UnixStream {
     }
 }
 
-fn send_fds(
-    sockfd: RawFd,
-    bufs: &[IoSlice],
-    fds: impl Iterator<Item = RawFd>,
-) -> io::Result<usize> {
-    debug_assert_eq!(
-        constants::CMSG_SCM_RIGHTS_SPACE as usize,
-        cmsg_buffer_fds_space(constants::MAX_FD_COUNT)
-    );
-    assert!(UnixStream::FD_QUEUE_SIZE <= constants::MAX_FD_COUNT);
-
-    // Size the buffer to be big enough to hold MAX_FD_COUNT RawFd's.
-    // The assertions above ensure that this is the case. The buffer
-    // must be zeroed because subsequent code will not clear padding
-    // bytes.
-    let mut cmsg_buffer = [0u8; constants::CMSG_SCM_RIGHTS_SPACE as _];
-
-    let counts = MsgHdr::from_io_slice(bufs, &mut cmsg_buffer)
-        .encode_fds(fds)?
-        .send(sockfd)?;
-
-    trace!(
-        source = "UnixStream",
-        event = "write",
-        fds_count = counts.fds_sent(),
-        byte_count = counts.bytes_sent(),
-    );
-
-    Ok(counts.bytes_sent())
-}
-
-fn recv_fds(
-    sockfd: RawFd,
-    bufs: &mut [IoSliceMut],
-    fds_sink: &mut impl Push<Fd>,
-) -> io::Result<usize> {
-    debug_assert_eq!(
-        constants::CMSG_SCM_RIGHTS_SPACE as usize,
-        cmsg_buffer_fds_space(constants::MAX_FD_COUNT)
-    );
-
-    // Size the buffer to be big enough to hold MAX_FD_COUNT RawFd's.
-    // The assertion above ensure that this is the case.
-    let mut cmsg_buffer = [0u8; constants::CMSG_SCM_RIGHTS_SPACE as _];
-
-    let mut recv = MsgHdr::from_io_slice_mut(bufs, &mut cmsg_buffer).recv(sockfd)?;
-
-    let mut fds_count = 0;
-    for fd in recv.take_fds() {
-        match fds_sink.push(fd) {
-            Ok(_) => fds_count += 1,
-            Err(_) => {
-                warn!(
-                    source = "UnixStream",
-                    event = "read",
-                    condition = "too many fds received"
-                );
-
-                return Err(PushFailureError::new());
-            }
-        }
-    }
-
-    if recv.was_control_truncated() {
-        warn!(
-            source = "UnixStream",
-            event = "read",
-            condition = "cmsgs truncated"
-        );
-
-        Err(CMsgTruncatedError::new())
-    } else {
-        trace!(
-            source = "UnixStream",
-            event = "read",
-            fds_count,
-            byte_count = recv.bytes_recvieved(),
-        );
-
-        Ok(recv.bytes_recvieved())
-    }
-}
-
 /// Enqueue a [`RawFd`][RawFd] for later transmission across the `UnixStream`.
 ///
 /// The [`RawFd`][RawFd] will be transmitted on a later call to a method of `Write`.
@@ -409,17 +308,7 @@ fn recv_fds(
 /// [RawFd]: https://doc.rust-lang.org/stable/std/os/unix/io/type.RawFd.html
 impl EnqueueFd for UnixStream {
     fn enqueue(&mut self, fd: &impl AsRawFd) -> std::result::Result<(), QueueFullError> {
-        let outfd = self
-            .outfd
-            .get_or_insert_with(|| Vec::with_capacity(Self::FD_QUEUE_SIZE));
-        if outfd.len() >= Self::FD_QUEUE_SIZE {
-            warn!(source = "UnixStream", event = "enqueue", condition = "full");
-            Err(QueueFullError::new())
-        } else {
-            trace!(source = "UnixStream", event = "enqueue", count = 1);
-            outfd.push(fd.as_raw_fd());
-            Ok(())
-        }
+        self.biqueue.enqueue(fd)
     }
 }
 
@@ -432,13 +321,7 @@ impl EnqueueFd for UnixStream {
 /// [RawFd]: https://doc.rust-lang.org/stable/std/os/unix/io/type.RawFd.html
 impl DequeueFd for UnixStream {
     fn dequeue(&mut self) -> Option<RawFd> {
-        let result = self.infd.pop_front();
-        trace!(
-            source = "UnixStream",
-            event = "dequeue",
-            count = if result.is_some() { 1 } else { 0 }
-        );
-        result.map(|fd| fd.into_raw_fd())
+        self.biqueue.dequeue()
     }
 }
 
@@ -459,7 +342,7 @@ impl Read for UnixStream {
     }
 
     fn read_vectored(&mut self, bufs: &mut [IoSliceMut]) -> io::Result<usize> {
-        recv_fds(self.as_raw_fd(), bufs, &mut self.infd)
+        self.biqueue.read_vectored(self.as_raw_fd(), bufs)
     }
 }
 
@@ -475,12 +358,7 @@ impl Write for UnixStream {
     }
 
     fn write_vectored(&mut self, bufs: &[IoSlice]) -> io::Result<usize> {
-        let outfd = self.outfd.take();
-
-        match outfd {
-            Some(mut fds) => send_fds(self.as_raw_fd(), bufs, fds.drain(..)),
-            None => send_fds(self.as_raw_fd(), bufs, iter::empty()),
-        }
+        self.biqueue.write_vectored(self.as_raw_fd(), bufs)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -510,16 +388,8 @@ impl From<StdUnixStream> for UnixStream {
     fn from(inner: StdUnixStream) -> Self {
         Self {
             inner,
-            infd: VecDeque::with_capacity(Self::FD_QUEUE_SIZE),
-            outfd: None,
+            biqueue: BiQueue::new(),
         }
-    }
-}
-
-impl Push<Fd> for VecDeque<Fd> {
-    fn push(&mut self, item: Fd) -> Result<(), Fd> {
-        self.push_back(item);
-        Ok(())
     }
 }
 
@@ -709,10 +579,6 @@ impl UnixListener {
     pub fn incoming(&self) -> Incoming {
         Incoming { listener: self }
     }
-
-    pub(crate) fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
-        self.inner.set_nonblocking(nonblocking)
-    }
 }
 
 impl AsRawFd for UnixListener {
@@ -759,47 +625,6 @@ impl Iterator for Incoming<'_> {
     fn size_hint(&self) -> (usize, Option<usize>) {
         (usize::MAX, None)
     }
-}
-
-// === impl CMsgTruncatedError ===
-impl CMsgTruncatedError {
-    fn new() -> Error {
-        Error::new(ErrorKind::Other, CMsgTruncatedError {})
-    }
-}
-
-impl fmt::Display for CMsgTruncatedError {
-    fn fmt(&self, f: &mut fmt::Formatter) -> Result<(), fmt::Error> {
-        write!(
-            f,
-            "The buffer used to receive file descriptors was too small."
-        )
-    }
-}
-
-impl std::error::Error for CMsgTruncatedError {}
-
-// === impl PushFailureError ===
-impl PushFailureError {
-    fn new() -> Error {
-        Error::new(ErrorKind::Other, PushFailureError {})
-    }
-}
-
-impl fmt::Display for PushFailureError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "The sink for receiving file descriptors was unexpectedly full."
-        )
-    }
-}
-
-impl std::error::Error for PushFailureError {}
-
-// === precomputed constants generated by build.rs ===
-mod constants {
-    include!(concat!(env!("OUT_DIR"), "/constants.rs"));
 }
 
 #[cfg(test)]

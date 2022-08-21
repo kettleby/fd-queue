@@ -19,7 +19,7 @@ jobs:
           - stable
           - beta
           - nightly
-          - 1.49.0
+          - 1.61.0
 
     runs-on: ubuntu-latest
     if: github.actor != 'sbosnick-bot'
@@ -47,6 +47,24 @@ jobs:
         uses: actions-rs/clippy-check@v1
         with:
             token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Check net-fd
+        uses: actions-rs/cargo@v1
+        with:
+          command: check
+          args: --features net-fd
+
+      - name: Check mio-fd
+        uses: actions-rs/cargo@v1
+        with:
+          command: check
+          args: --features mio-fd
+
+      - name: Check tokio-fd
+        uses: actions-rs/cargo@v1
+        with:
+          command: check
+          args: --features tokio-fd
 
       - name: Test
         uses: actions-rs/cargo@v1

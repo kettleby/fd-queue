@@ -23,7 +23,7 @@ Add this to your `Cargo.toml`
 
 ```toml
 [dependencies]
-fd-queue = {version = "1.0.0-alpha.1", features = ["net-fd"]}
+fd-queue = {version = "1.0.0", features = ["net-fd"]}
 ```
 
 This enables the blocking implementation of the traits for enqueuing and
@@ -68,8 +68,8 @@ traits. To include implementations of the traits enable the following features:
 ## Rust Version Requirements
 The library will always support the Rust version that is two earlier
 than the current stable version. The current Minimum Supported Rust
-Version (MSRV) is 1.49.0. Any change to the MSRV will be treated as a
-breaking change for Semantic Version purposes.
+Version (MSRV) is 1.61.0. Any change to the MSRV will be treated as a
+minor change for Semantic Version purposes.
 
 ## Semantic Version and Release
 This library follows [semantic versioning][semver], but without [Rust's
