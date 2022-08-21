@@ -6,6 +6,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2022-08-21
+
+### Added
+- *(tokio)* change UnixStream to not use AsyncFd (#38)
+
+### Other
+- fix various spelling error in doc comments (#41)
+- update README for 1.0.0 release (#40)
+- fix release workflow (#39)
+- fix release workflow syntax error
+- convert release workflow to release-plz
+- update version of the checkout action
+- *(README)* remove references to semantic-release
+
 ## [1.0.0] - 2022-07-18
 
 ### Added
