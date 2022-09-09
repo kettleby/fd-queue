@@ -49,7 +49,7 @@ trait Push<A> {
 // === impl Biqueue ===
 
 impl BiQueue {
-    pub const FD_QUEUE_SIZE: usize = 2;
+    pub const FD_QUEUE_SIZE: usize = constants::MAX_FD_COUNT;
 
     pub fn new() -> Self {
         BiQueue {
