@@ -629,119 +629,44 @@ impl Iterator for Incoming<'_> {
 
 #[cfg(test)]
 mod test {
+    use std::fs::File;
+
     use super::*;
 
-    use std::convert::AsMut;
-    use std::ffi::c_void;
-    use std::ptr;
-    use std::slice;
-
-    use nix::fcntl::OFlag;
-    use nix::sys::mman::{mmap, munmap, shm_open, shm_unlink, MapFlags, ProtFlags};
-    use nix::sys::stat::Mode;
-    use nix::unistd::{close, ftruncate};
-
-    struct Shm {
-        fd: RawFd,
-        ptr: *mut u8,
-        len: usize,
-        name: String,
-    }
-
-    impl Shm {
-        fn new(name: &str, size: i64) -> Shm {
-            let oflag = OFlag::O_CREAT | OFlag::O_RDWR;
-            let fd =
-                shm_open(name, oflag, Mode::S_IRUSR | Mode::S_IWUSR).expect("Can't create shm.");
-            ftruncate(fd, size).expect("Can't ftruncate");
-            let len: usize = size as usize;
-
-            let prot = ProtFlags::PROT_READ | ProtFlags::PROT_WRITE;
-            let flags = MapFlags::MAP_SHARED;
-
-            let ptr = unsafe {
-                mmap(ptr::null_mut(), len, prot, flags, fd, 0).expect("Can't mmap") as *mut u8
-            };
-
-            Shm {
-                fd,
-                ptr,
-                len,
-                name: name.to_string(),
-            }
-        }
-
-        fn from_raw_fd(fd: RawFd, size: usize) -> Shm {
-            let prot = ProtFlags::PROT_READ | ProtFlags::PROT_WRITE;
-            let flags = MapFlags::MAP_SHARED;
-
-            let ptr = unsafe {
-                mmap(ptr::null_mut(), size, prot, flags, fd, 0).expect("Can't mmap") as *mut u8
-            };
-
-            Shm {
-                fd,
-                ptr,
-                len: size,
-                name: String::new(),
-            }
-        }
-    }
-
-    impl Drop for Shm {
-        fn drop(&mut self) {
-            unsafe {
-                munmap(self.ptr as *mut c_void, self.len).expect("Can't munmap");
-            }
-            close(self.fd).expect("Can't close");
-            if !self.name.is_empty() {
-                let name: &str = self.name.as_ref();
-                shm_unlink(name).expect("Can't shm_unlink");
-            }
-        }
-    }
-
-    impl AsMut<[u8]> for Shm {
-        fn as_mut(&mut self) -> &mut [u8] {
-            unsafe { slice::from_raw_parts_mut(self.ptr, self.len) }
-        }
-    }
-
-    impl AsRawFd for Shm {
-        fn as_raw_fd(&self) -> RawFd {
-            self.fd
-        }
-    }
-
-    fn make_hello(name: &str) -> Shm {
-        let hello = b"Hello World!\0";
-        let mut shm = Shm::new(name, hello.len() as i64);
-
-        shm.as_mut().copy_from_slice(hello.as_ref());
-
-        shm
-    }
-
-    fn compare_hello(fd: RawFd) -> bool {
-        let hello = b"Hello World!\0";
-        let mut shm = Shm::from_raw_fd(fd, hello.len());
-
-        &shm.as_mut()[..hello.len()] == hello.as_ref()
-    }
+    use tempfile::tempfile;
 
     #[test]
     fn unix_stream_passes_fd() {
-        let shm = make_hello("/unix_stream_passes_fd");
+        let file1 = make_hello();
         let mut buf = vec![0; 20];
 
         let (mut sut1, mut sut2) = UnixStream::pair().expect("Can't make pair");
-        sut1.enqueue(&shm).expect("Can't enqueue");
+        sut1.enqueue(&file1).expect("Can't enqueue");
         sut1.write(b"abc").expect("Can't write");
         sut1.flush().expect("Can't flush");
         sut2.read(&mut buf).expect("Can't read");
         let fd = sut2.dequeue().expect("Empty fd queue");
 
-        assert!(fd != shm.fd, "fd's unexpectedly equal");
+        assert!(fd != file1.as_raw_fd(), "fd's unexpectedly equal");
         assert!(compare_hello(fd), "fd didn't contain expect contents");
+    }
+
+    fn make_hello() -> File {
+        let mut file = tempfile().expect("Can't create temp file.");
+        file.write_all(b"Hello World!\0")
+            .expect("Can't write to temp file.");
+        file.flush().expect("Can't flush temp file.");
+        file.seek(io::SeekFrom::Start(0))
+            .expect("Can't seek the temp file.");
+
+        file
+    }
+
+    fn compare_hello(fd: RawFd) -> bool {
+        let mut file = unsafe { File::from_raw_fd(fd) };
+        let mut buf = Vec::new();
+        file.read_to_end(&mut buf).expect("Can't read from file.");
+
+        &buf[..] == b"Hello World!\0".as_ref()
     }
 }
