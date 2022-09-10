@@ -19,7 +19,7 @@ jobs:
         name: Release-plz
         runs-on: ubuntu-latest
         #if: ${{ false }} # disable for now
-        if: github.actor != 'sbosnick-bot'
+        #if: github.actor != 'sbosnick-bot'
 
         steps:
           - name: Checkout
