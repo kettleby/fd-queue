@@ -14,17 +14,23 @@ use std::convert::{TryFrom, TryInto};
 use std::io::{self, prelude::*, IoSlice, IoSliceMut};
 use std::net::Shutdown;
 use std::os::unix::io::{AsRawFd, FromRawFd, IntoRawFd, RawFd};
-use std::os::unix::net::{SocketAddr, UnixListener as StdUnixListner, UnixStream as StdUnixStream};
+use std::os::unix::net::{UnixListener as StdUnixListener, UnixStream as StdUnixStream};
 use std::path::Path;
 
-use mio::{event::Evented, unix::EventedFd, Poll, PollOpt, Ready, Token};
+use mio::{
+    event::Source,
+    net::{SocketAddr, UnixListener as MioUnixListener, UnixStream as MioUnixStream},
+    Interest, Registry, Token,
+};
 
+use crate::biqueue::BiQueue;
 /// A non-blocking Unix stream socket with support for passing [`RawFd`][RawFd].
 ///
 /// [RawFd]: https://doc.rust-lang.org/stable/std/os/unix/io/type.RawFd.html
 #[derive(Debug)]
 pub struct UnixStream {
-    inner: crate::UnixStream,
+    inner: MioUnixStream,
+    biqueue: BiQueue,
 }
 
 /// A non-blocking Unix domain socket server with support for passing [`RawFd`][RawFd].
@@ -32,21 +38,32 @@ pub struct UnixStream {
 /// [RawFd]: https://doc.rust-lang.org/stable/std/os/unix/io/type.RawFd.html
 #[derive(Debug)]
 pub struct UnixListener {
-    inner: crate::UnixListener,
+    inner: MioUnixListener,
 }
 
 // === impl UnixStream ===
 impl UnixStream {
     /// Connects to the socket named by `path`.
-    ///
-    /// Note that this is synchronous.
     pub fn connect(path: impl AsRef<Path>) -> io::Result<UnixStream> {
-        StdUnixStream::connect(path)?.try_into()
+        MioUnixStream::connect(path)?.try_into()
+    }
+
+    /// Creates a new UnixStream from a standard net::UnixStream
+    ///
+    /// # Note
+    ///
+    /// It is left up the callee to call stream.set_nonblocking(true)
+    /// prior to calling this method.
+    pub fn from_std(stream: StdUnixStream) -> UnixStream {
+        Self {
+            inner: MioUnixStream::from_std(stream),
+            biqueue: BiQueue::new(),
+        }
     }
 
     /// Creates an unnamed pair of connected sockets.
     pub fn pair() -> io::Result<(UnixStream, UnixStream)> {
-        let (sock1, sock2) = StdUnixStream::pair()?;
+        let (sock1, sock2) = MioUnixStream::pair()?;
 
         Ok((sock1.try_into()?, sock2.try_into()?))
     }
@@ -73,37 +90,64 @@ impl UnixStream {
     pub fn shutdown(&self, how: Shutdown) -> io::Result<()> {
         self.inner.shutdown(how)
     }
+
+    /// Execute an I/O operation ensuring that the socket receives more events
+    /// if it hits a WouldBlock error.
+    /// See https://docs.rs/mio/latest/mio/net/struct.UnixStream.html#method.try_io
+    pub fn try_io<F, T>(&self, f: F) -> io::Result<T>
+    where
+        F: FnOnce() -> io::Result<T>,
+    {
+        self.inner.try_io(f)
+    }
 }
 
 impl EnqueueFd for UnixStream {
     fn enqueue(&mut self, fd: &impl AsRawFd) -> Result<(), QueueFullError> {
-        self.inner.enqueue(fd)
+        self.biqueue.enqueue(fd)
     }
 }
 
 impl DequeueFd for UnixStream {
     fn dequeue(&mut self) -> Option<RawFd> {
-        self.inner.dequeue()
+        self.biqueue.dequeue()
     }
 }
 
+/// Receive bytes and [`RawFd`][RawFd] that are transmitted across the `UnixStream`.
+///
+/// The [`RawFd`][RawFd] that are received along with the bytes will be available
+/// through the method of the `DequeueFd` implementation. The number of
+/// [`RawFd`][RawFd] that can be received in a single call to one of the `Read`
+/// methods is bounded by `FD_QUEUE_SIZE`. It is an error if the other side of this
+/// `UnixStream` attempted to send more control messages (including [`RawFd`][RawFd])
+/// than will fit in the buffer that has been sized for receiving up to
+/// `FD_QUEUE_SIZE` [`RawFd`][RawFd].
+///
+/// [RawFd]: https://doc.rust-lang.org/stable/std/os/unix/io/type.RawFd.html
 impl Read for UnixStream {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        self.inner.read(buf)
+        self.read_vectored(&mut [IoSliceMut::new(buf)])
     }
 
     fn read_vectored(&mut self, bufs: &mut [IoSliceMut]) -> io::Result<usize> {
-        self.inner.read_vectored(bufs)
+        self.biqueue.read_vectored(self.as_raw_fd(), bufs)
     }
 }
 
+/// Transmit bytes and [`RawFd`][RawFd] across the `UnixStream`.
+///
+/// The [`RawFd`][RawFd] that are transmitted along with the bytes are ones that were
+/// previously enqueued for transmission through the method of `EnqueueFd`.
+///
+/// [RawFd]: https://doc.rust-lang.org/stable/std/os/unix/io/type.RawFd.html
 impl Write for UnixStream {
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
-        self.inner.write(buf)
+        self.write_vectored(&[IoSlice::new(buf)])
     }
 
     fn write_vectored(&mut self, bufs: &[IoSlice]) -> io::Result<usize> {
-        self.inner.write_vectored(bufs)
+        self.biqueue.write_vectored(self.as_raw_fd(), bufs)
     }
 
     fn flush(&mut self) -> io::Result<()> {
@@ -111,29 +155,33 @@ impl Write for UnixStream {
     }
 }
 
-impl Evented for UnixStream {
+impl Source for UnixStream {
     fn register(
-        &self,
-        registry: &Poll,
+        &mut self,
+        registry: &Registry,
         token: Token,
-        interests: Ready,
-        opts: PollOpt,
+        interests: Interest,
     ) -> io::Result<()> {
-        EventedFd(&self.as_raw_fd()).register(registry, token, interests, opts)
+        Source::register(&mut self.inner, registry, token, interests)
     }
 
     fn reregister(
-        &self,
-        registry: &Poll,
+        &mut self,
+        registry: &Registry,
         token: Token,
-        interests: Ready,
-        opts: PollOpt,
+        interests: Interest,
     ) -> io::Result<()> {
-        EventedFd(&self.as_raw_fd()).reregister(registry, token, interests, opts)
+        Source::reregister(&mut self.inner, registry, token, interests)
     }
 
-    fn deregister(&self, registry: &Poll) -> io::Result<()> {
-        EventedFd(&self.as_raw_fd()).deregister(registry)
+    fn deregister(&mut self, registry: &Registry) -> io::Result<()> {
+        Source::deregister(&mut self.inner, registry)
+    }
+}
+
+impl IntoRawFd for UnixStream {
+    fn into_raw_fd(self) -> RawFd {
+        self.inner.into_raw_fd()
     }
 }
 
@@ -149,27 +197,21 @@ impl AsRawFd for UnixStream {
 /// required change has already been done.
 impl FromRawFd for UnixStream {
     unsafe fn from_raw_fd(fd: RawFd) -> Self {
-        let inner = StdUnixStream::from_raw_fd(fd);
+        let inner = MioUnixStream::from_raw_fd(fd);
         UnixStream {
-            inner: inner.into(),
+            inner,
+            biqueue: BiQueue::new(),
         }
     }
 }
 
-impl IntoRawFd for UnixStream {
-    fn into_raw_fd(self) -> RawFd {
-        self.inner.into_raw_fd()
-    }
-}
-
-impl TryFrom<StdUnixStream> for UnixStream {
+impl TryFrom<MioUnixStream> for UnixStream {
     type Error = io::Error;
 
-    fn try_from(inner: StdUnixStream) -> io::Result<UnixStream> {
-        inner.set_nonblocking(true)?;
-
+    fn try_from(inner: MioUnixStream) -> io::Result<UnixStream> {
         Ok(UnixStream {
-            inner: inner.into(),
+            inner,
+            biqueue: BiQueue::new(),
         })
     }
 }
@@ -181,7 +223,7 @@ impl UnixListener {
     ///
     /// The listener will be set to non-blocking mode.
     pub fn bind(path: impl AsRef<Path>) -> io::Result<UnixListener> {
-        StdUnixListner::bind(path)?.try_into()
+        MioUnixListener::bind(path)?.try_into()
     }
 
     /// Accepts a new incoming connection to this listener.
@@ -189,9 +231,25 @@ impl UnixListener {
     /// The returned stream will be set to non-blocking mode.
     pub fn accept(&self) -> io::Result<(UnixStream, SocketAddr)> {
         self.inner.accept().and_then(|(stream, addr)| {
-            stream.set_nonblocking(true)?;
-            Ok((UnixStream { inner: stream }, addr))
+            Ok((
+                UnixStream {
+                    inner: stream,
+                    biqueue: BiQueue::new(),
+                },
+                addr,
+            ))
         })
+    }
+    /// Creates a new UnixListener from standard net::UnixListener
+    ///
+    /// # Note
+    ///
+    /// It is left up the callee to call listener.set_nonblocking(true)
+    /// prior to calling this method.
+    pub fn from_std(listener: StdUnixListener) -> UnixListener {
+        Self {
+            inner: MioUnixListener::from_std(listener),
+        }
     }
 
     /// Returns the local socket address for this listener.
@@ -217,10 +275,8 @@ impl AsRawFd for UnixListener {
 /// required change has already been done.
 impl FromRawFd for UnixListener {
     unsafe fn from_raw_fd(fd: RawFd) -> Self {
-        let inner = StdUnixListner::from_raw_fd(fd);
-        UnixListener {
-            inner: inner.into(),
-        }
+        let inner = MioUnixListener::from_raw_fd(fd);
+        UnixListener { inner }
     }
 }
 
@@ -230,41 +286,35 @@ impl IntoRawFd for UnixListener {
     }
 }
 
-impl Evented for UnixListener {
+impl Source for UnixListener {
     fn register(
-        &self,
-        registry: &Poll,
+        &mut self,
+        registry: &Registry,
         token: Token,
-        interests: Ready,
-        opts: PollOpt,
+        interests: Interest,
     ) -> io::Result<()> {
-        EventedFd(&self.as_raw_fd()).register(registry, token, interests, opts)
+        Source::register(&mut self.inner, registry, token, interests)
     }
 
     fn reregister(
-        &self,
-        registry: &Poll,
+        &mut self,
+        registry: &Registry,
         token: Token,
-        interests: Ready,
-        opts: PollOpt,
+        interests: Interest,
     ) -> io::Result<()> {
-        EventedFd(&self.as_raw_fd()).reregister(registry, token, interests, opts)
+        Source::reregister(&mut self.inner, registry, token, interests)
     }
 
-    fn deregister(&self, registry: &Poll) -> io::Result<()> {
-        EventedFd(&self.as_raw_fd()).deregister(registry)
+    fn deregister(&mut self, registry: &Registry) -> io::Result<()> {
+        Source::deregister(&mut self.inner, registry)
     }
 }
 
-impl TryFrom<StdUnixListner> for UnixListener {
+impl TryFrom<MioUnixListener> for UnixListener {
     type Error = io::Error;
 
-    fn try_from(inner: StdUnixListner) -> Result<Self, Self::Error> {
-        inner.set_nonblocking(true)?;
-
-        Ok(UnixListener {
-            inner: inner.into(),
-        })
+    fn try_from(inner: MioUnixListener) -> Result<UnixListener, Self::Error> {
+        Ok(UnixListener { inner })
     }
 }
 
@@ -290,32 +340,33 @@ mod tests {
 
     #[test]
     fn stream_is_ready_for_read_after_write() {
-        let poll = Poll::new().expect("Can't create poll.");
+        let mut poll = Poll::new().expect("Can't create poll.");
         let mut events = Events::with_capacity(5);
 
         let (mut sut, mut other) = UnixStream::pair().expect("Unable to create pair.");
-        poll.register(&mut sut, Token(0), Ready::readable(), PollOpt::edge())
-            .unwrap();
-        write_to_steam(&mut other);
+        poll.registry()
+            .register(&mut sut, Token(0), Interest::READABLE)
+            .expect("Couldn't register stream with mio");
+        write_to_stream(&mut other);
 
         let mut count = 0;
         loop {
             poll.poll(&mut events, Some(Duration::from_secs(1)))
-                .unwrap();
+                .expect("Couldn't poll mio");
             count += 1;
             if count > 500 {
                 panic!("Too many spurious wakeups.");
             }
 
             for event in &events {
-                if event.token() == Token(0) && event.readiness().is_readable() {
+                if event.token() == Token(0) && event.is_readable() {
                     return;
                 }
             }
         }
     }
 
-    fn write_to_steam(stream: &mut UnixStream) {
+    fn write_to_stream(stream: &mut UnixStream) {
         let mut count = 0;
         loop {
             count += 1;
