@@ -699,7 +699,7 @@ impl error::Error for CMsgBufferTooSmallError {}
 
 /// Returns the size needed for a msghdr control buffer big
 /// enough to hold `count` `RawFd`'s.
-pub fn cmsg_buffer_fds_space(count: usize) -> usize {
+pub const fn cmsg_buffer_fds_space(count: usize) -> usize {
     // Safety: CMSG_SPACE is safe
     unsafe { CMSG_SPACE((count * mem::size_of::<RawFd>()) as u32) as usize }
 }
