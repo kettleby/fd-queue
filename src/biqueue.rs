@@ -13,7 +13,6 @@ use std::{
     collections::VecDeque,
     fmt,
     io::{self, Error, ErrorKind, IoSlice, IoSliceMut},
-    iter,
     os::unix::io::{AsRawFd, IntoRawFd, RawFd},
 };
 
@@ -33,7 +32,7 @@ mod iomsg;
 #[derive(Debug)]
 pub struct BiQueue {
     infd: VecDeque<Fd>,
-    outfd: Option<Vec<RawFd>>,
+    outfd: Vec<RawFd>,
 }
 
 #[derive(Debug)]
@@ -54,17 +53,12 @@ impl BiQueue {
     pub fn new() -> Self {
         BiQueue {
             infd: VecDeque::with_capacity(Self::FD_QUEUE_SIZE),
-            outfd: None,
+            outfd: Vec::with_capacity(Self::FD_QUEUE_SIZE),
         }
     }
 
     pub fn write_vectored(&mut self, fd: impl AsRawFd, bufs: &[IoSlice]) -> io::Result<usize> {
-        let outfd = self.outfd.take();
-
-        match outfd {
-            Some(mut outfds) => send_fds(fd.as_raw_fd(), bufs, outfds.drain(..)),
-            None => send_fds(fd.as_raw_fd(), bufs, iter::empty()),
-        }
+        send_fds(fd.as_raw_fd(), bufs, self.outfd.drain(..))
     }
 
     pub fn read_vectored(
@@ -99,14 +93,11 @@ impl Push<Fd> for BiQueue {
 
 impl EnqueueFd for BiQueue {
     fn enqueue(&mut self, fd: &impl AsRawFd) -> std::result::Result<(), QueueFullError> {
-        let outfd = self
-            .outfd
-            .get_or_insert_with(|| Vec::with_capacity(Self::FD_QUEUE_SIZE));
-        if outfd.len() >= Self::FD_QUEUE_SIZE {
+        if self.outfd.len() >= Self::FD_QUEUE_SIZE {
             warn!(source = "UnixStream", event = "enqueue", condition = "full");
             Err(QueueFullError::new())
         } else {
-            outfd.push(fd.as_raw_fd());
+            self.outfd.push(fd.as_raw_fd());
             trace!(source = "UnixStream", event = "enqueue", count = 1);
             Ok(())
         }
