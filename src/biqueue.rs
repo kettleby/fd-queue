@@ -13,16 +13,19 @@ use std::{
     collections::VecDeque,
     fmt,
     io::{self, Error, ErrorKind, IoSlice, IoSliceMut},
-    iter,
     os::unix::io::{AsRawFd, IntoRawFd, RawFd},
 };
 
 use ::tracing::{trace, warn};
+use smallvec::SmallVec;
 
 use crate::{DequeueFd, EnqueueFd, QueueFullError};
 use iomsg::{cmsg_buffer_fds_space, Fd, MsgHdr};
 
 mod iomsg;
+
+/// The default size of the inbound and outbound fd queues.
+pub const DEFAULT_FD_QUEUE_SIZE: usize = 2;
 
 /// The Bi-directional queue for fd passing.
 ///
@@ -31,9 +34,9 @@ mod iomsg;
 /// and [`BiQueue::read_vectored`] methods. The inbound and outbound queues are accessed
 /// through the [`EnqueueFd`] and [`DequeueFd`] trait impl's.
 #[derive(Debug)]
-pub struct BiQueue {
+pub struct BiQueue<const SIZE: usize = DEFAULT_FD_QUEUE_SIZE> {
     infd: VecDeque<Fd>,
-    outfd: Option<Vec<RawFd>>,
+    outfd: Vec<RawFd>,
 }
 
 #[derive(Debug)]
@@ -48,23 +51,18 @@ trait Push<A> {
 
 // === impl Biqueue ===
 
-impl BiQueue {
-    pub const FD_QUEUE_SIZE: usize = 2;
+impl<const SIZE: usize> BiQueue<SIZE> {
+    pub const FD_QUEUE_SIZE: usize = SIZE;
 
     pub fn new() -> Self {
         BiQueue {
             infd: VecDeque::with_capacity(Self::FD_QUEUE_SIZE),
-            outfd: None,
+            outfd: Vec::with_capacity(Self::FD_QUEUE_SIZE),
         }
     }
 
     pub fn write_vectored(&mut self, fd: impl AsRawFd, bufs: &[IoSlice]) -> io::Result<usize> {
-        let outfd = self.outfd.take();
-
-        match outfd {
-            Some(mut outfds) => send_fds(fd.as_raw_fd(), bufs, outfds.drain(..)),
-            None => send_fds(fd.as_raw_fd(), bufs, iter::empty()),
-        }
+        Self::send_fds(fd.as_raw_fd(), bufs, self.outfd.drain(..))
     }
 
     pub fn read_vectored(
@@ -72,11 +70,11 @@ impl BiQueue {
         fd: impl AsRawFd,
         bufs: &mut [IoSliceMut],
     ) -> io::Result<usize> {
-        recv_fds(fd.as_raw_fd(), bufs, self)
+        Self::recv_fds(fd.as_raw_fd(), bufs, self)
     }
 }
 
-impl DequeueFd for BiQueue {
+impl<const SIZE: usize> DequeueFd for BiQueue<SIZE> {
     fn dequeue(&mut self) -> Option<RawFd> {
         let result = self.infd.pop_front().map(|fd| fd.into_raw_fd());
 
@@ -90,23 +88,20 @@ impl DequeueFd for BiQueue {
     }
 }
 
-impl Push<Fd> for BiQueue {
+impl<const SIZE: usize> Push<Fd> for BiQueue<SIZE> {
     fn push(&mut self, item: Fd) -> Result<(), Fd> {
         self.infd.push_back(item);
         Ok(())
     }
 }
 
-impl EnqueueFd for BiQueue {
+impl<const SIZE: usize> EnqueueFd for BiQueue<SIZE> {
     fn enqueue(&mut self, fd: &impl AsRawFd) -> std::result::Result<(), QueueFullError> {
-        let outfd = self
-            .outfd
-            .get_or_insert_with(|| Vec::with_capacity(Self::FD_QUEUE_SIZE));
-        if outfd.len() >= Self::FD_QUEUE_SIZE {
+        if self.outfd.len() >= Self::FD_QUEUE_SIZE {
             warn!(source = "UnixStream", event = "enqueue", condition = "full");
             Err(QueueFullError::new())
         } else {
-            outfd.push(fd.as_raw_fd());
+            self.outfd.push(fd.as_raw_fd());
             trace!(source = "UnixStream", event = "enqueue", count = 1);
             Ok(())
         }
@@ -115,76 +110,83 @@ impl EnqueueFd for BiQueue {
 
 // === helper functions ===
 
-fn send_fds(
-    sockfd: RawFd,
-    bufs: &[IoSlice],
-    fds: impl Iterator<Item = RawFd>,
-) -> io::Result<usize> {
-    // Size the buffer to be big enough to hold FD_QUEUE_SIZE RawFd's.
-    // The buffer must be zeroed because subsequent code will not clear padding
-    // bytes.
-    let mut cmsg_buffer = [0u8; cmsg_buffer_fds_space(BiQueue::FD_QUEUE_SIZE)];
+// Currently the type alias below is an error in stable rust. Once
+// #![feature(generic_const_exprs)] is stabalized, though, it may be possible
+// to change to this alias instead of the one based on SmallVec.
+//type CMsgBuffer<const SIZE: usize> = [u8; cmsg_buffer_fds_space(SIZE)];
+type CMsgBuffer = SmallVec<[u8; cmsg_buffer_fds_space(DEFAULT_FD_QUEUE_SIZE)]>;
 
-    let counts = MsgHdr::from_io_slice(bufs, &mut cmsg_buffer)
-        .encode_fds(fds)?
-        .send(sockfd)?;
+impl<const SIZE: usize> BiQueue<SIZE> {
+    fn send_fds(
+        sockfd: RawFd,
+        bufs: &[IoSlice],
+        fds: impl Iterator<Item = RawFd>,
+    ) -> io::Result<usize> {
+        // Size the buffer to be big enough to hold SIZE RawFd's. The buffer
+        // must be zeroed because subsequent code will not clear padding bytes.
+        let mut cmsg_buffer = CMsgBuffer::from_elem(0, cmsg_buffer_fds_space(SIZE));
 
-    trace!(
-        source = "UnixStream",
-        event = "write",
-        fds_count = counts.fds_sent(),
-        byte_count = counts.bytes_sent(),
-    );
+        let counts = MsgHdr::from_io_slice(bufs, &mut cmsg_buffer)
+            .encode_fds(fds)?
+            .send(sockfd)?;
 
-    Ok(counts.bytes_sent())
-}
-
-fn recv_fds(
-    sockfd: RawFd,
-    bufs: &mut [IoSliceMut],
-    fds_sink: &mut impl Push<Fd>,
-) -> io::Result<usize> {
-    // Size the buffer to be big enough to hold FD_QUEUE_SIZE RawFd's.
-    let mut cmsg_buffer = [0u8; cmsg_buffer_fds_space(BiQueue::FD_QUEUE_SIZE)];
-
-    let mut recv = MsgHdr::from_io_slice_mut(bufs, &mut cmsg_buffer).recv(sockfd)?;
-
-    let mut fds_count = 0;
-    for fd in recv.take_fds() {
-        match fds_sink.push(fd) {
-            Ok(_) => fds_count += 1,
-            Err(_) => {
-                warn!(
-                    source = "UnixStream",
-                    event = "read",
-                    condition = "too many fds received"
-                );
-
-                return Err(PushFailureError::new());
-            }
-        }
-    }
-
-    if recv.was_control_truncated() {
-        warn!(
-            source = "UnixStream",
-            event = "read",
-            condition = "cmsgs truncated"
-        );
-
-        Err(CMsgTruncatedError::new())
-    } else {
         trace!(
             source = "UnixStream",
-            event = "read",
-            fds_count,
-            byte_count = recv.bytes_recvieved(),
+            event = "write",
+            fds_count = counts.fds_sent(),
+            byte_count = counts.bytes_sent(),
         );
 
-        Ok(recv.bytes_recvieved())
+        Ok(counts.bytes_sent())
+    }
+
+    fn recv_fds(
+        sockfd: RawFd,
+        bufs: &mut [IoSliceMut],
+        fds_sink: &mut impl Push<Fd>,
+    ) -> io::Result<usize> {
+        // Size the buffer to be big enough to hold SIZE RawFd's. The buffer
+        // must be zeroed because subsequent code will not clear padding bytes.
+        let mut cmsg_buffer = CMsgBuffer::from_elem(0, cmsg_buffer_fds_space(SIZE));
+
+        let mut recv = MsgHdr::from_io_slice_mut(bufs, &mut cmsg_buffer).recv(sockfd)?;
+
+        let mut fds_count = 0;
+        for fd in recv.take_fds() {
+            match fds_sink.push(fd) {
+                Ok(_) => fds_count += 1,
+                Err(_) => {
+                    warn!(
+                        source = "UnixStream",
+                        event = "read",
+                        condition = "too many fds received"
+                    );
+
+                    return Err(PushFailureError::new());
+                }
+            }
+        }
+
+        if recv.was_control_truncated() {
+            warn!(
+                source = "UnixStream",
+                event = "read",
+                condition = "cmsgs truncated"
+            );
+
+            Err(CMsgTruncatedError::new())
+        } else {
+            trace!(
+                source = "UnixStream",
+                event = "read",
+                fds_count,
+                byte_count = recv.bytes_recvieved(),
+            );
+
+            Ok(recv.bytes_recvieved())
+        }
     }
 }
-
 // === impl CMsgTruncatedError ===
 impl CMsgTruncatedError {
     fn new() -> Error {

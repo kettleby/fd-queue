@@ -19,7 +19,7 @@ use std::{
 // needed until the MSRV is 1.43 when the associated constant becomes available
 use std::usize;
 
-use crate::biqueue::BiQueue;
+use crate::biqueue::{self, BiQueue};
 
 use crate::{DequeueFd, EnqueueFd, QueueFullError};
 
@@ -94,7 +94,7 @@ impl UnixStream {
     /// The size of the bounded queue of outbound [`RawFd`][RawFd].
     ///
     /// [RawFd]: https://doc.rust-lang.org/stable/std/os/unix/io/type.RawFd.html
-    pub const FD_QUEUE_SIZE: usize = BiQueue::FD_QUEUE_SIZE;
+    pub const FD_QUEUE_SIZE: usize = biqueue::DEFAULT_FD_QUEUE_SIZE;
 
     /// Connects to the socket named by `path`.
     ///
