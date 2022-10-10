@@ -95,7 +95,7 @@ impl<const SIZE: usize> Push<Fd> for BiQueue<SIZE> {
     }
 }
 
-impl EnqueueFd for BiQueue {
+impl<const SIZE: usize> EnqueueFd for BiQueue<SIZE> {
     fn enqueue(&mut self, fd: &impl AsRawFd) -> std::result::Result<(), QueueFullError> {
         if self.outfd.len() >= Self::FD_QUEUE_SIZE {
             warn!(source = "UnixStream", event = "enqueue", condition = "full");
