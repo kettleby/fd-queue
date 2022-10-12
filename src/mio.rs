@@ -93,7 +93,7 @@ impl UnixStream {
 
     /// Execute an I/O operation ensuring that the socket receives more events
     /// if it hits a WouldBlock error.
-    /// See https://docs.rs/mio/latest/mio/net/struct.UnixStream.html#method.try_io
+    /// See <https://docs.rs/mio/latest/mio/net/struct.UnixStream.html#method.try_io>
     pub fn try_io<F, T>(&self, f: F) -> io::Result<T>
     where
         F: FnOnce() -> io::Result<T>,
@@ -322,6 +322,7 @@ impl TryFrom<MioUnixListener> for UnixListener {
 mod tests {
     use super::*;
 
+    use std::fs;
     use std::io::ErrorKind;
     use std::time::Duration;
 
@@ -362,6 +363,87 @@ mod tests {
                 if event.token() == Token(0) && event.is_readable() {
                     return;
                 }
+            }
+        }
+    }
+
+    #[test]
+    fn stream_bind_and_connect_and_pass_open_file() {
+        let mut poll = Poll::new().expect("Can't create poll.");
+        let mut events = Events::with_capacity(5);
+
+        // Temporary dir to place everything
+        let mut dir = tempfile::tempdir()
+            .expect("couldn't create tempdir")
+            .into_path();
+
+        dir.push("fd-queue.sock");
+        let mut listener = UnixListener::bind(&dir).expect("couldn't bind to unix socket");
+        let mut stream = UnixStream::connect(&dir).expect("couldn't connect to unix socket");
+
+        dir.pop();
+        dir.push("fd-queue.file");
+        let file = fs::File::create(&dir).expect("couldn't create file");
+
+        const UNIX_LISTENER: Token = mio::Token(0);
+        const UNIX_STREAM: Token = mio::Token(1);
+        const UNIX_STREAM_SERVER: Token = mio::Token(2);
+        const FILE_READ: Token = mio::Token(3);
+        const TIMEOUT: Duration = Duration::from_millis(10);
+
+        poll.registry()
+            .register(&mut listener, UNIX_LISTENER, mio::Interest::READABLE)
+            .expect("couldn't register listener with mio");
+        poll.registry()
+            .register(&mut stream, UNIX_STREAM, mio::Interest::READABLE)
+            .expect("couldn't register stream with mio");
+
+        let mut server_stream: Option<UnixStream> = None;
+
+        for n in 0..3 {
+            poll.poll(&mut events, Some(TIMEOUT))
+                .expect("couldn't poll mio for events");
+            let evs = events.iter().collect::<Vec<&mio::event::Event>>();
+            assert_eq!(evs.len(), 1);
+
+            match n {
+                0 => {
+                    assert_eq!(evs[0].token(), UNIX_LISTENER);
+                    let (mut ss, _) = listener
+                        .accept()
+                        .expect("couldn't accept from unix listener");
+
+                    poll.registry()
+                        .register(&mut ss, UNIX_STREAM_SERVER, mio::Interest::WRITABLE)
+                        .expect("couldn't register unix stream server for writing");
+
+                    server_stream = Some(ss);
+                }
+                1 => {
+                    assert_eq!(evs[0].token(), UNIX_STREAM_SERVER);
+                    server_stream
+                        .as_mut()
+                        .unwrap()
+                        .enqueue(&file.as_raw_fd())
+                        .expect("couldn't enqueue tempfile");
+
+                    server_stream
+                        .as_mut()
+                        .unwrap()
+                        .write(&[54, 89])
+                        .expect("couldn't write to server stream");
+                }
+                2 => {
+                    assert_eq!(evs[0].token(), UNIX_STREAM);
+                    stream.read(&mut [0, 0]).expect("couldn't read from stream");
+                    let fd = stream.dequeue().expect("couldn't get fd from stream");
+                    let mut file = mio::unix::SourceFd(&fd);
+
+                    poll.registry()
+                        .register(&mut file, FILE_READ, mio::Interest::READABLE)
+                        .expect("couldn't register file for reading");
+                }
+                _ => panic!("test loop executed too many time"),
             }
         }
     }
